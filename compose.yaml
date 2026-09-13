@@ -1,0 +1,70 @@
+# Production deployment: Caddy terminates HTTPS on 80/443 and proxies to the app,
+# which is reachable only inside the Docker network. Configuration comes from .env
+# (see .env.example). Caddy keeps certificates in a persistent volume.
+name: tubetrace-mcp
+
+services:
+  app:
+    build: .
+    image: tubetrace-mcp:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8000"
+      # Trust X-Forwarded-* only from the Caddy container (static address below).
+      FORWARDED_ALLOW_IPS: 172.28.0.10
+    expose:
+      - "8000"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN:?Set MCP_DOMAIN in .env (public hostname)}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env (Let's Encrypt contact)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      internal:
+        ipv4_address: 172.28.0.10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

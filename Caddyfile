@@ -1,0 +1,48 @@
+# Caddy reverse proxy for TubeTrace MCP.
+# Requires MCP_DOMAIN and ACME_EMAIL in the environment (docker compose passes them
+# from .env). Certificates are obtained automatically from Let's Encrypt once the
+# domain's A/AAAA records point at this host and ports 80/443 are reachable.
+{
+	email {$ACME_EMAIL}
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 5m
+		}
+	}
+}
+
+{$MCP_DOMAIN} {
+	log {
+		output stderr
+		format json
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	@mcp path /mcp /healthz
+	handle @mcp {
+		reverse_proxy app:8000 {
+			# Flush immediately so MCP SSE streams are not buffered.
+			flush_interval -1
+			transport http {
+				dial_timeout 10s
+				# Must exceed the app's TOOL_TIMEOUT_SECONDS (45s by default).
+				response_header_timeout 120s
+			}
+		}
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

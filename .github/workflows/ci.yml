@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, types, tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python and dependencies (locked)
+        run: |
+          uv python install
+          uv sync --locked --group dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: mypy
+        run: uv run mypy
+      - name: pytest (live tests are skipped without RUN_LIVE_TESTS)
+        run: uv run pytest -q
+      - name: Build package
+        run: uv build
+
+  docker:
+    name: Docker image, compose and Caddyfile validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t tubetrace-mcp:ci .
+      - name: Image smoke test (config check, no network)
+        run: |
+          docker run --rm -e APP_ENV=development -e AUTH_DISABLED=true \
+            tubetrace-mcp:ci tubetrace-mcp check-config
+      - name: Validate compose files with a throwaway .env
+        run: |
+          cp .env.example .env
+          MCP_DOMAIN=mcp.example.com ACME_EMAIL=ci@example.com docker compose -f compose.yaml config -q
+          docker compose -f compose.dev.yaml config -q
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e MCP_DOMAIN=mcp.example.com -e ACME_EMAIL=ci@example.com \
+            caddy:2 caddy validate --config /etc/caddy/Caddyfile

@@ -1,0 +1,94 @@
+[project]
+name = "tubetrace-mcp"
+version = "0.1.0"
+description = "Personal read-only MCP server (Streamable HTTP + bearer auth) for YouTube video search and transcript retrieval."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.15"
+authors = [{ name = "TubeTrace MCP authors" }]
+keywords = ["mcp", "fastmcp", "youtube", "transcripts", "captions"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+  "fastmcp>=4.0.3,<5",
+  "httpx>=0.28.1,<1",
+  "pydantic>=2.13,<3",
+  "pydantic-settings>=2.15,<3",
+  "requests>=2.32,<3",
+  "uvicorn>=0.52,<1",
+  "youtube-transcript-api>=1.2.4,<2",
+]
+
+[project.scripts]
+tubetrace-mcp = "tubetrace_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ph20/tubetrace-mcp"
+Repository = "https://github.com/ph20/tubetrace-mcp"
+
+[dependency-groups]
+dev = [
+  "mypy>=2.3,<3",
+  "pytest>=9.1,<10",
+  "pytest-asyncio>=1.4,<2",
+  "ruff>=0.16,<1",
+  "types-requests>=2.32",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "S", "N", "RUF", "SIM", "PTH", "T20"]
+ignore = [
+  "S101",   # assert is fine in tests
+  "S311",   # random is used only for retry jitter, not for security
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "ASYNC", "T20"]
+"examples/**" = ["T20", "S105"]
+"src/tubetrace_mcp/cli.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src", "tests", "examples"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["youtube_transcript_api", "youtube_transcript_api.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+  "live: tests that call real Google/YouTube endpoints (opt-in via RUN_LIVE_TESTS=1)",
+  "e2e: end-to-end tests over a real local HTTP transport",
+]
+filterwarnings = [
+  "error::RuntimeWarning",
+]

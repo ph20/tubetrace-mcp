@@ -1,0 +1,17 @@
+# Local development in Docker without Caddy: plain HTTP published only on
+# 127.0.0.1:8000. Usage: docker compose -f compose.dev.yaml up --build
+name: tubetrace-mcp-dev
+
+services:
+  app:
+    build: .
+    image: tubetrace-mcp:dev
+    env_file:
+      - .env
+    environment:
+      APP_ENV: development
+      HOST: 0.0.0.0
+      PORT: "8000"
+      LOG_FORMAT: text
+    ports:
+      - "127.0.0.1:8000:8000"

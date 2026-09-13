@@ -1,0 +1,14 @@
+# Codex CLI / ChatGPT desktop / IDE extension MCP configuration for TubeTrace.
+# Put this table into ~/.codex/config.toml (global) or .codex/config.toml (project).
+# Format checked against the Codex MCP documentation on 2026-09-13.
+#
+# Client side: export TUBETRACE_MCP_TOKEN="<the token printed by `tubetrace-mcp generate-token`>"
+# Server side: MCP_TOKEN_SHA256 holds only the SHA-256 digest of that token.
+
+[mcp_servers.tubetrace]
+url = "https://mcp.example.com/mcp"
+bearer_token_env_var = "TUBETRACE_MCP_TOKEN"
+# Optional tuning (defaults shown):
+# startup_timeout_sec = 10
+# tool_timeout_sec = 60     # keep above the server's TOOL_TIMEOUT_SECONDS (default 45)
+# enabled = true
