@@ -125,11 +125,25 @@ Claude Code documentation (`claude mcp add --transport http … --header`).
 - Verified locally: `AUTH_MODE=platform APP_ENV=production uv run fastmcp inspect horizon.py:mcp`
   reports the server with 3 tools (the same inspection Horizon runs at build time); the test
   suite loads the entrypoint through FastMCP's `FileSystemSource` exactly like the CLI does.
-- Not verified: an actual deployment on Horizon (requires a Horizon account and the GitHub app),
-  the behaviour of the transcript provider from Horizon's AWS egress addresses (likely
-  `UPSTREAM_BLOCKED`), and whether Horizon forwards the client `Authorization` header when
-  Horizon authentication is disabled (the README describes that variant as documented by
-  Horizon, not as tested).
+- Verified on Horizon (2026-09-14, server `tubetrace-mcp-hgy78r`, deployment of `cfbecb3`):
+  the first build (`3d54a55`) failed because `.dockerignore` excluded `horizon.py` from
+  Horizon's `COPY . /app` (fixed in `cfbecb3`); the second build detected `fastmcp.json`,
+  Python 3.12 and `uv.lock`, ran `uv sync --frozen --no-dev` and `fastmcp inspect`, and went
+  Live. Server logs: `auth_delegated_to_platform`, `server_started` with `auth_mode=platform`,
+  `google_configured=true`, FastMCP started the server as `transport 'http' (stateless)` on
+  port 8080. Environment variables in the dashboard: `APP_ENV`, `AUTH_MODE`, `YOUTUBE_API_KEY`
+  (encrypted). Horizon authentication enabled: an unauthenticated `POST /mcp` from outside
+  returns 401 with `WWW-Authenticate: Bearer` and OAuth protected-resource metadata; `/healthz`
+  is also behind the gateway (401). Playground: `youtube_list_transcripts` (6 tracks for
+  `dQw4w9WgXcQ`), `youtube_get_transcript` (61 segments, manual English track,
+  `has_more=false`), `youtube_search_videos` (real `search.list`, 1 quota call) all succeeded
+  from Horizon's AWS egress, i.e. the provider was not blocked that day; a spoofed hostname
+  returned `INVALID_VIDEO_INPUT` (`host_not_allowed`) as an `isError` tool result. Traffic
+  logs show 9 gateway requests, 0 errors, with the caller identity; server logs contain no key
+  or token material.
+- Not verified: whether Horizon forwards the client `Authorization` header when Horizon
+  authentication is disabled (the README describes that variant as documented by Horizon, not
+  as tested).
 - Sources: gofastmcp.com/deployment/prefect-horizon; docs.horizon.prefect.io (quickstart,
   platform/build-system, platform/compute-model, gateway, platform/authentication,
   environment-variables, limits, platform/networking); introspection of FastMCP 4.0.3

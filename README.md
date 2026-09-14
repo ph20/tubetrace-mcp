@@ -384,10 +384,11 @@ server would be public.
   request/response, 1024 MB memory, ephemeral filesystem; compute starts on demand, so the first
   request after idling is slower (`horizon.py` keeps import-time work small).
 - The cache and rate limit remain process-local; Horizon may run more than one instance.
-- Horizon runs in AWS `us-east-1` with shared egress addresses. The unofficial transcript
-  provider is often blocked from cloud IP ranges: `youtube_list_transcripts` and
-  `youtube_get_transcript` may return `UPSTREAM_BLOCKED` there while `youtube_search_videos`
-  (official API) keeps working. This server does not bypass blocks; see
+- Horizon runs in AWS `us-east-1` with shared egress addresses. On 2026-09-14 the unofficial
+  transcript provider worked from there (listing and fetching a transcript succeeded), but
+  YouTube blocks cloud IP ranges at its own discretion, so `youtube_list_transcripts` and
+  `youtube_get_transcript` may start returning `UPSTREAM_BLOCKED` at any time while
+  `youtube_search_videos` (official API) keeps working. This server does not bypass blocks; see
   [Unofficial transcript provider, blocking and legal notes](#unofficial-transcript-provider-blocking-and-legal-notes).
 - Horizon injects `horizon-actor*` headers with the verified caller identity; the server does not
   read them (single-owner design), but they appear in Horizon's request logs.
