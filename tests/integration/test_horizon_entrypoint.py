@@ -92,3 +92,16 @@ def test_fastmcp_json_points_at_the_entrypoint() -> None:
     assert config["environment"]["project"] == "."
     assert config["deployment"]["transport"] == "http"
     assert config["deployment"]["path"] == "/mcp"
+
+
+def test_dockerignore_keeps_horizon_build_inputs() -> None:
+    """Horizon runs `COPY . /app` with this repository as the Docker context."""
+    patterns = [
+        line.strip()
+        for line in (REPO_ROOT / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#") and not line.startswith("!")
+    ]
+    required = ["horizon.py", "fastmcp.json", "pyproject.toml", "uv.lock", "README.md", "src"]
+    for name in required:
+        assert name not in patterns, f"{name} must reach the Horizon build context"
+        assert Path(name).suffix not in {p.lstrip("*") for p in patterns if p.startswith("*.")}

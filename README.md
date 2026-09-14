@@ -325,6 +325,9 @@ authentication, environment variables, limits).
   unauthenticated server.
 - A CI step that runs `fastmcp inspect horizon.py:mcp` with the Horizon configuration, i.e. the
   same inspection Horizon performs at build time.
+- `.dockerignore` keeps the build inputs: Horizon builds its own Docker image from the repository
+  (`COPY . /app`, `uv sync --frozen --no-dev`, then `fastmcp inspect /app/horizon.py`), so the
+  repository's `.dockerignore` applies to that build as well (covered by a test).
 
 **Steps:**
 

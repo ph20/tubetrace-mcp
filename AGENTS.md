@@ -47,6 +47,8 @@ Tests in `tests/unit`, `tests/integration` (in-memory MCP, ASGI, real HTTP e2e, 
   Horizon authenticates callers): no in-process verifier, and `MCP_TOKEN_SHA256` /
   `AUTH_DISABLED` must then be unset (an error otherwise). Never make `platform` the default
   and never infer it from the environment.
+- Horizon builds a Docker image from the repo root (`COPY . /app`), so `.dockerignore` must never
+  exclude `horizon.py`, `fastmcp.json`, `pyproject.toml`, `uv.lock`, `README.md` or `src/`.
 - `horizon.py` must stay importable with only env vars: no network, no `.env` dependency, no
   relative imports (Horizon loads it as a standalone file), and it must expose `mcp` at module
   level. Horizon runs the FastMCP object itself (stateful sessions handled by its gateway,

@@ -18,6 +18,6 @@ caddy_data
 caddy_config
 Caddyfile
 compose*.yaml
-# Prefect Horizon entrypoint and FastMCP CLI config: not used inside the image
-horizon.py
-fastmcp.json
+# NOTE: Prefect Horizon builds its own Docker image from this repository (COPY . /app), so this
+# file applies there too. horizon.py, fastmcp.json, pyproject.toml, uv.lock, README.md and src/
+# must never be ignored.
