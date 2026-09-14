@@ -19,11 +19,14 @@ from __future__ import annotations
 import re
 from functools import cached_property
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+_PROXY_SCHEMES = frozenset({"http", "https"})
 
 AppEnv = Literal["development", "production"]
 AuthMode = Literal["bearer", "platform"]
@@ -47,6 +50,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # Validation errors are printed by check-config/serve; never echo raw input, which can
+        # contain YOUTUBE_API_KEY or the password inside TRANSCRIPT_PROXY_URL.
+        hide_input_in_errors=True,
     )
 
     # --- deployment -------------------------------------------------------------
@@ -103,6 +109,14 @@ class Settings(BaseSettings):
         ),
     )
 
+    transcript_proxy_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "HTTP(S) proxy used ONLY for transcript requests (youtube-transcript-api), e.g. "
+            "http://user:password@pr.oxylabs.io:7777. Google search never uses it."
+        ),
+    )
+
     # --- upstream timeouts, retries, concurrency -------------------------------------
     google_api_base_url: str = "https://www.googleapis.com/youtube/v3"
     google_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
@@ -136,7 +150,12 @@ class Settings(BaseSettings):
 
     # --- validators ---------------------------------------------------------------
     @field_validator(
-        "youtube_api_key", "mcp_token_sha256", "mcp_domain", "acme_email", mode="before"
+        "youtube_api_key",
+        "mcp_token_sha256",
+        "mcp_domain",
+        "acme_email",
+        "transcript_proxy_url",
+        mode="before",
     )
     @classmethod
     def _blank_to_none(cls, value: Any) -> Any:
@@ -158,6 +177,29 @@ class Settings(BaseSettings):
         if "/" in value or ":" in value or " " in value:
             raise ValueError("MCP_DOMAIN must be a bare hostname such as mcp.example.com")
         return value
+
+    @field_validator("transcript_proxy_url")
+    @classmethod
+    def _proxy_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        # Never echo the value back: it normally embeds the proxy password.
+        try:
+            parts = urlsplit(raw)
+            port = parts.port
+        except ValueError:
+            raise ValueError("TRANSCRIPT_PROXY_URL is not a valid URL") from None
+        if parts.scheme.lower() not in _PROXY_SCHEMES:
+            raise ValueError(
+                "TRANSCRIPT_PROXY_URL must start with http:// or https:// "
+                "(for example http://user:password@pr.oxylabs.io:7777)"
+            )
+        if not parts.hostname or port is None:
+            raise ValueError("TRANSCRIPT_PROXY_URL must include a host and a port")
+        if parts.path not in ("", "/") or parts.query or parts.fragment:
+            raise ValueError("TRANSCRIPT_PROXY_URL must not contain a path, query or fragment")
+        return SecretStr(raw)
 
     @model_validator(mode="after")
     def _validate_auth(self) -> Settings:
@@ -244,8 +286,26 @@ class Settings(BaseSettings):
             self.youtube_api_key.get_secret_value().strip()
         )
 
+    @property
+    def transcript_proxy_configured(self) -> bool:
+        return self.transcript_proxy_url is not None
+
+    @property
+    def transcript_proxy_endpoint(self) -> str | None:
+        """``host:port`` of the transcript proxy without credentials (safe to print/log)."""
+        if self.transcript_proxy_url is None:
+            return None
+        parts = urlsplit(self.transcript_proxy_url.get_secret_value())
+        return f"{parts.hostname}:{parts.port}"
+
     def redaction_secrets(self) -> list[str]:
         secrets: list[str] = []
         if self.youtube_api_key is not None:
             secrets.append(self.youtube_api_key.get_secret_value())
+        if self.transcript_proxy_url is not None:
+            proxy_url = self.transcript_proxy_url.get_secret_value()
+            secrets.append(proxy_url)
+            password = urlsplit(proxy_url).password
+            if password:
+                secrets.extend({password, unquote(password)})
         return secrets

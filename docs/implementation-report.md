@@ -149,6 +149,30 @@ Claude Code documentation (`claude mcp add --transport http … --header`).
   environment-variables, limits, platform/networking); introspection of FastMCP 4.0.3
   (`fastmcp.cli.run`, `FileSystemSource`, `run_http_async`).
 
+## 6b. Transcript proxy (added 2026-09-14)
+
+- `TRANSCRIPT_PROXY_URL` (`http(s)://user:password@host:port`, `SecretStr`) is applied only to the
+  `youtube-transcript-api` sessions. `TimeoutSession` also passes the proxies per request because
+  `requests` otherwise lets `HTTP(S)_PROXY` environment variables override `Session.proxies`. The
+  httpx search client is untouched.
+- `youtube-transcript-api`'s `ProxyConfig` is not used: `retries_when_blocked` would retry on the
+  same session/connection and mount its own urllib3 retry adapters. Instead a block through a proxy
+  is marked retryable and goes through the provider's own bounded retry loop with a fresh session.
+- Validation errors never echo the URL; the URL and its password are added to log redaction, and a
+  generic `scheme://user:password@` redaction pattern covers short passwords.
+- Verified with unit tests (fake sessions/adapters, no network) and live on 2026-09-14 through
+  Oxylabs Mobile Proxies (`pr.oxylabs.io:7777`, rotating, `-cc-US`), from a residential Ukrainian
+  network:
+  - the provider's session exited through a US mobile carrier IP while the search `httpx` client
+    exited directly from the local IP (proxy isolation);
+  - `list` + `fetch` succeeded through the proxy for two videos (about 4-6 s each);
+  - a full `tubetrace-mcp serve` run with `examples/client.py` returned search results, the track
+    list and a transcript page; neither the password nor the proxy username appeared in the server
+    log or client output;
+  - a wrong password returned `UPSTREAM_ERROR` / `proxy_auth_failed` (not retried) through MCP while
+    search kept working.
+  Not verified: the retry-on-block path against a real YouTube block (no block occurred).
+
 ## 7. Files
 
 Key files: `pyproject.toml`, `uv.lock`, `src/tubetrace_mcp/**`, `tests/**`, `horizon.py`,

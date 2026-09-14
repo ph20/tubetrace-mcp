@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
 
@@ -219,7 +219,8 @@ def test_blocking_is_not_reported_as_missing_subtitles() -> None:
     err = classify_exception(IpBlocked(VID))
     assert err.code == ErrorCode.UPSTREAM_BLOCKED
     assert "blocked" in err.message.lower()
-    assert "not bypass" in err.message
+    assert "TRANSCRIPT_PROXY_URL" in err.message
+    assert err.retryable is False
     unparsable = classify_exception(YouTubeDataUnparsable(VID))
     assert unparsable.code == ErrorCode.UPSTREAM_ERROR
     assert "does not mean the video has no subtitles" in unparsable.message
@@ -323,3 +324,111 @@ def test_timeout_session_applies_timeouts() -> None:
     assert captured["timeout"] == (1.5, 7.0)
     session.get("https://example.invalid/", timeout=3)
     assert captured["timeout"] == 3
+
+
+# ------------------------------------------------------------------ transcript proxy
+
+PROXY_URL = "http://customer-user:s3cret-pass@proxy.example:7777"
+
+
+async def test_proxy_is_applied_to_every_session(executor: ThreadPoolExecutor) -> None:
+    FakeApi.instances.clear()
+    transcripts = [FakeTranscript("en", False, [Snippet("hi", 0, 1)])]
+    provider = make_provider(
+        executor,
+        lambda session: FakeApi(session, transcripts=transcripts),
+        proxy_url=PROXY_URL,
+        session_factory=lambda: SessionSpy(1, 2),
+    )
+    assert provider.uses_proxy is True
+    await provider.list_transcripts(VID)
+    await provider.list_transcripts(VID)
+    sessions = [api.session for api in FakeApi.instances]
+    assert len(sessions) == 2
+    for session in sessions:
+        assert session.proxies == {"http": PROXY_URL, "https": PROXY_URL}
+
+
+async def test_no_proxy_by_default(executor: ThreadPoolExecutor) -> None:
+    FakeApi.instances.clear()
+    provider = make_provider(executor, lambda session: FakeApi(session, transcripts=[]))
+    assert provider.uses_proxy is False
+    await provider.list_transcripts(VID)
+    assert FakeApi.instances[-1].session.proxies == {}
+
+
+def test_timeout_session_proxy_wins_over_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://env-proxy.invalid:1")
+    monkeypatch.setenv("HTTP_PROXY", "http://env-proxy.invalid:1")
+    captured: dict[str, Any] = {}
+
+    class Adapter(requests.adapters.HTTPAdapter):
+        def send(
+            self,
+            request: requests.PreparedRequest,
+            stream: bool = False,
+            timeout: Any = None,
+            verify: bool | str = True,
+            cert: Any = None,
+            proxies: Mapping[str, str] | None = None,
+        ) -> requests.Response:
+            captured.update({"timeout": timeout, "proxies": proxies})
+            response = requests.Response()
+            response.status_code = 200
+            response.request = request
+            return response
+
+    session = TimeoutSession(1.0, 2.0, PROXY_URL)
+    session.mount("https://", Adapter())
+    session.get("https://www.youtube.com/watch?v=" + VID)
+    assert captured["proxies"]["https"] == PROXY_URL
+    assert captured["timeout"] == (1.0, 2.0)
+
+
+def test_real_library_keeps_session_proxies() -> None:
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    session = TimeoutSession(1.0, 2.0, PROXY_URL)
+    YouTubeTranscriptApi(http_client=session)  # no network in the constructor
+    assert session.proxies == {"http": PROXY_URL, "https": PROXY_URL}
+
+
+async def test_block_is_retried_only_through_a_proxy(executor: ThreadPoolExecutor) -> None:
+    transcripts = [FakeTranscript("en", False, [Snippet("hi", 0, 1)])]
+    direct = make_provider(executor, shared_errors([RequestBlocked(VID)], transcripts))
+    with pytest.raises(TubeTraceError) as info:
+        await direct.list_transcripts(VID)
+    assert info.value.code == ErrorCode.UPSTREAM_BLOCKED
+    assert info.value.retryable is False
+
+    proxied = make_provider(
+        executor,
+        shared_errors([RequestBlocked(VID), IpBlocked(VID)], transcripts),
+        proxy_url=PROXY_URL,
+    )
+    tracks = await proxied.list_transcripts(VID)
+    assert [t.language_code for t in tracks] == ["en"]
+
+    exhausted = make_provider(
+        executor,
+        shared_errors([RequestBlocked(VID)] * 3, transcripts),
+        proxy_url=PROXY_URL,
+    )
+    with pytest.raises(TubeTraceError) as info:
+        await exhausted.list_transcripts(VID)
+    assert info.value.code == ErrorCode.UPSTREAM_BLOCKED
+    assert info.value.details["via_proxy"] is True
+
+
+def test_proxy_errors_are_classified_without_leaking_the_url() -> None:
+    auth = classify_exception(
+        req_exc.ProxyError(f"Unable to connect to proxy {PROXY_URL}: 407 Proxy Authentication")
+    )
+    assert auth.code == ErrorCode.UPSTREAM_ERROR
+    assert auth.details == {"reason": "proxy_auth_failed"}
+    assert auth.retryable is False
+    other = classify_exception(req_exc.ProxyError(f"Unable to connect to proxy {PROXY_URL}"))
+    assert other.details == {"reason": "proxy_error"}
+    assert other.retryable is True
+    for err in (auth, other):
+        assert "s3cret" not in str(err.to_dict())

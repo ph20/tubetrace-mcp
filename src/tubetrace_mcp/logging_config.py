@@ -53,6 +53,8 @@ _GENERIC_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-._~+/]+=*"),
     re.compile(r"(?i)([?&](?:key|token|access_token|api_key|apikey)=)[^&\s\"']+"),
+    # user:password@ credentials embedded in URLs (for example a proxy URL)
+    re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s/@]+(@)"),
 )
 
 
@@ -76,6 +78,7 @@ class SecretRedactor:
         text = _GENERIC_PATTERNS[0].sub("[REDACTED]", text)
         text = _GENERIC_PATTERNS[1].sub(r"\1[REDACTED]", text)
         text = _GENERIC_PATTERNS[2].sub(r"\1[REDACTED]", text)
+        text = _GENERIC_PATTERNS[3].sub(r"\1[REDACTED]\2", text)
         return text
 
 

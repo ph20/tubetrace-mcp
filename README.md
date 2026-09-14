@@ -57,7 +57,8 @@ No databases, queues, LLMs or paid transcript services.
 - no hidden auto-pagination, no downloading transcripts for all search results;
 - no audio/video downloads, ASR, translation or summarization;
 - no `captions.download` (it requires OAuth and edit rights on the video);
-- no CAPTCHA solving, IP-block bypassing, private-access bypassing, proxy rotation or cookies;
+- no CAPTCHA solving, private-access bypassing or cookies; an optional HTTP(S) proxy can be set
+  for transcript requests only (see [Transcript proxy](#transcript-proxy));
 - it is not an OAuth authorization server: this is a single-owner `Authorization: Bearer`
   scheme for clients that can send a static token.
 
@@ -80,6 +81,7 @@ MCP client (Codex / Claude Code / FastMCP Client)
      ├─ services/          track selection, pagination, cache, search/transcript services
      ├─ search_client.py   httpx.AsyncClient → googleapis.com (key in the X-Goog-Api-Key header)
      └─ providers/         TranscriptProvider (Protocol) + youtube-transcript-api in a bounded thread pool
+                           (optional TRANSCRIPT_PROXY_URL applies to this traffic only)
 ```
 
 The cache and the rate limit are **in-memory and process-local**: they are not shared between
@@ -172,6 +174,7 @@ The full list with defaults is in [`.env.example`](.env.example).
 | Kind | Variable | Description |
 |---|---|---|
 | server secret | `YOUTUBE_API_KEY` | Google key restricted to the YouTube Data API v3. Optional. |
+| server secret | `TRANSCRIPT_PROXY_URL` | `http(s)://user:password@host:port` proxy for **transcript requests only**; search never uses it. Optional. See [Transcript proxy](#transcript-proxy). |
 | client credential (digest only) | `MCP_TOKEN_SHA256` | SHA-256 hex digest(s) of the bearer token, comma-separated for rotation. Required in production. |
 | mode | `APP_ENV` | `development` / `production` (fail-closed). |
 | network | `HOST`, `PORT` | application bind address (in Docker `0.0.0.0:8000`). |
@@ -187,6 +190,34 @@ The full list with defaults is in [`.env.example`](.env.example).
 
 Validate the configuration without starting: `uv run tubetrace-mcp check-config`
 (secrets are not printed).
+
+### Transcript proxy
+
+YouTube often blocks transcript requests from cloud/datacenter IPs. `TRANSCRIPT_PROXY_URL` routes
+**only** the `youtube-transcript-api` traffic (watch page, InnerTube player call, caption download)
+through an HTTP(S) proxy. The Google Data API search client is a separate `httpx` client and never
+uses it, so search quota and latency are unaffected.
+
+```dotenv
+# Oxylabs Mobile Proxies: backconnect entry, rotating exit IP, US exits (fewer consent pages)
+TRANSCRIPT_PROXY_URL=http://customer-<username>-cc-US:<password>@pr.oxylabs.io:7777
+```
+
+- Take the username from the Oxylabs dashboard (**Mobile Proxies → Users**); the password is
+  the one set for that user (the dashboard does not display it). Percent-encode special characters.
+- For a sticky exit IP, use the endpoint generator's username form
+  (`customer-<username>-sessid-<id>-sesstime-10`); rotating is usually better here.
+- Only `http://` and `https://` proxy URLs are accepted; the URL must include a host and a port.
+- The URL is a secret: it is redacted from logs, and `check-config` / startup logs show only
+  `host:port`.
+- With a proxy configured, `UPSTREAM_BLOCKED` becomes **retryable**: every attempt opens a fresh
+  session (a new proxy connection), so a rotating proxy serves it from another exit IP. Retries stay
+  bounded by `UPSTREAM_MAX_RETRIES` and `UPSTREAM_RETRY_BUDGET_SECONDS`.
+- Proxy failures are `UPSTREAM_ERROR` with `details.reason` `proxy_auth_failed` (HTTP 407, not
+  retried) or `proxy_error` (retried).
+- Traffic is billed by the proxy provider. One uncached transcript call downloads the watch page
+  (roughly 1 MB) plus the caption track, so plan the traffic budget accordingly; the transcript
+  cache (`TRANSCRIPT_CACHE_TTL_SECONDS`) avoids repeated downloads.
 
 ## uv commands and tests
 
@@ -622,7 +653,7 @@ Expected failures are returned as an **MCP tool error** (`isError: true`) with t
 | `RESPONSE_TOO_LARGE` | a single segment does not fit into `MAX_RESPONSE_BYTES` | no |
 | `RATE_LIMITED` | local per-process limit (`details.retry_after_seconds`) | yes |
 | `SERVER_BUSY` | the concurrent upstream request limit is exhausted | yes |
-| `UPSTREAM_BLOCKED` | YouTube blocked the provider (IP/request block, PO token) — **not** "no subtitles" | no |
+| `UPSTREAM_BLOCKED` | YouTube blocked the provider (IP/request block, PO token) — **not** "no subtitles" | only with `TRANSCRIPT_PROXY_URL` |
 | `UPSTREAM_RATE_LIMITED` | 429 from Google/YouTube | yes |
 | `UPSTREAM_TIMEOUT` | upstream timeout or the tool time budget | yes |
 | `UPSTREAM_ERROR` | other upstream/network/parsing failure (`details.reason`) | depends |
@@ -651,7 +682,8 @@ redaction is also applied to exception text.
 | `GOOGLE_API_NOT_CONFIGURED` | `YOUTUBE_API_KEY` did not reach the container (`docker compose exec app tubetrace-mcp check-config`) |
 | `GOOGLE_API_KEY_INVALID` (`accessNotConfigured`) | the API is not enabled in the project or the key is restricted to another API/IP |
 | `GOOGLE_QUOTA_EXCEEDED` | the 100 daily `search.list` calls are used up; wait for the reset (PT) or request a quota increase |
-| `UPSTREAM_BLOCKED` | YouTube blocks the server's IP (common for cloud/datacenter); check the provider from this network — the server does not bypass blocks |
+| `UPSTREAM_BLOCKED` | YouTube blocks the server's IP (common for cloud/datacenter); set `TRANSCRIPT_PROXY_URL`. With `details.via_proxy: true` the proxy exit IP was blocked: retry, or switch the proxy's country/session type |
+| `UPSTREAM_ERROR` with `proxy_auth_failed` / `proxy_error` | wrong proxy username/password (percent-encode special characters) / the proxy host or port is unreachable; `check-config` shows the endpoint in use |
 | `UPSTREAM_ERROR` with `unparsable_response` | YouTube changed something or soft-blocks; update `youtube-transcript-api` |
 | Caddy does not obtain a certificate | DNS A/AAAA → this server? ports 80/443 open? `docker compose logs caddy`; Let's Encrypt rate limits |
 | The client "hangs" on a long call | align `TOOL_TIMEOUT_SECONDS` < Caddy `response_header_timeout` < the client timeout |
@@ -662,9 +694,10 @@ redaction is also applied to exception text.
   retrieving **already existing** subtitles with no availability guarantee. The library's
   availability does not imply Google's approval.
 - YouTube frequently **blocks cloud provider IPs** (`UPSTREAM_BLOCKED`, `IpBlocked`/`RequestBlocked`,
-  PO token requirement). The server returns a diagnostic error and does **not** bypass blocks, use
-  cookies/login, rotate proxies or retry endlessly. In practice this means transcripts may be
-  unavailable on some VPS hosts while search through the official API keeps working.
+  PO token requirement). The server returns a diagnostic error and does **not** use cookies/login,
+  solve CAPTCHAs or retry endlessly. Without `TRANSCRIPT_PROXY_URL` transcripts may be unavailable
+  on some VPS hosts while search through the official API keeps working; with it, blocks depend on
+  the reputation of the proxy's exit IPs, and the proxy provider's terms apply as well.
 - Some videos have no subtitles (`TRANSCRIPTS_DISABLED`) or only automatic ones.
 - Before using this, review the [YouTube Terms of Service](https://www.youtube.com/t/terms), the
   [YouTube API Services Terms](https://developers.google.com/youtube/terms/api-services-terms-of-service)

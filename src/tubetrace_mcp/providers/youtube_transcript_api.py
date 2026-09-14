@@ -5,6 +5,11 @@ thread pool with a fresh ``requests.Session`` that enforces connect/read
 timeouts, so no session is shared between threads. Retries are bounded, use
 exponential backoff with jitter, honour ``Retry-After`` and a total time budget,
 and are attempted only for transient failures.
+
+An optional HTTP(S) proxy (``TRANSCRIPT_PROXY_URL``) is applied to these sessions
+only; the Google search client never sees it. With a proxy configured, a YouTube
+block is treated as retryable: every attempt opens a fresh session and therefore a
+new proxy connection, which a rotating proxy serves from a different exit IP.
 """
 
 from __future__ import annotations
@@ -49,21 +54,41 @@ PROVIDER_NAME = "youtube_transcript_api"
 
 BLOCK_HINT = (
     "YouTube refused the request from this server's network (common for cloud/datacenter "
-    "IP addresses). Verify that the transcript provider works from this network; this "
-    "server does not bypass blocks, solve CAPTCHAs or rotate proxies."
+    "IP addresses). Verify that the transcript provider works from this network, or "
+    "configure TRANSCRIPT_PROXY_URL; this server does not solve CAPTCHAs."
+)
+
+PROXY_BLOCK_HINT = (
+    "The request went through the configured transcript proxy, so YouTube blocked the "
+    "proxy's exit IP. A retry may be served from a different exit IP."
 )
 
 
 class TimeoutSession(requests.Session):
-    """``requests.Session`` that applies connect/read timeouts to every request."""
+    """``requests.Session`` that applies connect/read timeouts to every request.
 
-    def __init__(self, connect_timeout: float, read_timeout: float) -> None:
+    Session-level proxies are also passed per request, because ``requests`` otherwise
+    lets ``HTTP(S)_PROXY`` environment variables take precedence over ``Session.proxies``.
+    """
+
+    def __init__(
+        self, connect_timeout: float, read_timeout: float, proxy_url: str | None = None
+    ) -> None:
         super().__init__()
         self._timeout = (connect_timeout, read_timeout)
+        if proxy_url:
+            self.proxies.update(proxy_dict(proxy_url))
 
     def request(self, *args: Any, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
+        if self.proxies:
+            kwargs.setdefault("proxies", dict(self.proxies))
         return super().request(*args, **kwargs)
+
+
+def proxy_dict(proxy_url: str) -> dict[str, str]:
+    """The ``requests`` proxy mapping that routes both HTTP and HTTPS through one proxy."""
+    return {"http": proxy_url, "https": proxy_url}
 
 
 TranscriptApiFactory = Callable[[requests.Session], Any]
@@ -79,6 +104,10 @@ class YouTubeTranscriptApiProvider:
 
     name = PROVIDER_NAME
 
+    @property
+    def uses_proxy(self) -> bool:
+        return self._proxy_url is not None
+
     def __init__(
         self,
         *,
@@ -91,6 +120,7 @@ class YouTubeTranscriptApiProvider:
         retry_budget_seconds: float,
         max_segments: int,
         max_bytes: int,
+        proxy_url: str | None = None,
         api_factory: TranscriptApiFactory | None = None,
         session_factory: SessionFactory | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -104,9 +134,10 @@ class YouTubeTranscriptApiProvider:
         self._retry_budget = retry_budget_seconds
         self._max_segments = max_segments
         self._max_bytes = max_bytes
+        self._proxy_url = proxy_url or None
         self._api_factory = api_factory or _default_api_factory
         self._session_factory = session_factory or (
-            lambda: TimeoutSession(connect_timeout_seconds, read_timeout_seconds)
+            lambda: TimeoutSession(connect_timeout_seconds, read_timeout_seconds, self._proxy_url)
         )
         self._sleep = sleep
         self._rng = rng
@@ -147,6 +178,7 @@ class YouTubeTranscriptApiProvider:
                         "attempt": attempt + 1,
                         "error_code": str(err.code),
                         "delay_seconds": round(delay, 3),
+                        "via_proxy": self.uses_proxy,
                     },
                 )
                 await self._sleep(delay)
@@ -172,6 +204,9 @@ class YouTubeTranscriptApiProvider:
     def _guarded[T](self, fn: Callable[[Any], T]) -> T:
         """Runs in a worker thread with its own session (never shared between threads)."""
         session = self._session_factory()
+        if self._proxy_url is not None:
+            # Enforced here as well, so a custom session factory cannot bypass the proxy.
+            session.proxies.update(proxy_dict(self._proxy_url))
         try:
             api = self._api_factory(session)
             try:
@@ -179,7 +214,7 @@ class YouTubeTranscriptApiProvider:
             except TubeTraceError:
                 raise
             except Exception as exc:
-                mapped = classify_exception(exc)
+                mapped = classify_exception(exc, proxy_configured=self.uses_proxy)
                 if mapped.code == ErrorCode.UPSTREAM_ERROR and mapped.details.get("reason") in {
                     "unexpected",
                     "unparsable_response",
@@ -278,8 +313,12 @@ def _http_status(exc: YouTubeRequestFailed) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def classify_exception(exc: Exception) -> TubeTraceError:
-    """Map library and network exceptions onto stable error codes."""
+def classify_exception(exc: Exception, *, proxy_configured: bool = False) -> TubeTraceError:
+    """Map library and network exceptions onto stable error codes.
+
+    ``proxy_configured`` makes YouTube blocks retryable (a new attempt uses a new proxy
+    connection) and adjusts the diagnostic hint.
+    """
     if isinstance(exc, TranscriptsDisabled):
         return TubeTraceError(
             ErrorCode.TRANSCRIPTS_DISABLED,
@@ -294,15 +333,19 @@ def classify_exception(exc: Exception) -> TubeTraceError:
         reason = "ip_blocked" if isinstance(exc, IpBlocked) else "request_blocked"
         return TubeTraceError(
             ErrorCode.UPSTREAM_BLOCKED,
-            "The transcript provider was blocked by YouTube. " + BLOCK_HINT,
-            details={"reason": reason},
+            "The transcript provider was blocked by YouTube. "
+            + (PROXY_BLOCK_HINT if proxy_configured else BLOCK_HINT),
+            retryable=proxy_configured,
+            details={"reason": reason, "via_proxy": proxy_configured},
         )
     if isinstance(exc, PoTokenRequired):
         return TubeTraceError(
             ErrorCode.UPSTREAM_BLOCKED,
             "YouTube requires a proof-of-origin token for this request; the provider cannot "
-            "fetch this transcript from this server. " + BLOCK_HINT,
-            details={"reason": "po_token_required"},
+            "fetch this transcript from this server. "
+            + (PROXY_BLOCK_HINT if proxy_configured else BLOCK_HINT),
+            retryable=proxy_configured,
+            details={"reason": "po_token_required", "via_proxy": proxy_configured},
         )
     if isinstance(exc, AgeRestricted):
         return TubeTraceError(
@@ -365,6 +408,22 @@ def classify_exception(exc: Exception) -> TubeTraceError:
             "Timed out while contacting YouTube for transcripts.",
             retryable=True,
         )
+    if isinstance(exc, req_exc.ProxyError):
+        # Checked before ConnectionError (its base class). The exception text is not copied
+        # into the result because it can contain the proxy address.
+        if "407" in str(exc):
+            return TubeTraceError(
+                ErrorCode.UPSTREAM_ERROR,
+                "The transcript proxy rejected the configured credentials "
+                "(407 Proxy Authentication Required); check TRANSCRIPT_PROXY_URL.",
+                details={"reason": "proxy_auth_failed"},
+            )
+        return TubeTraceError(
+            ErrorCode.UPSTREAM_ERROR,
+            "Could not reach YouTube through the configured transcript proxy.",
+            retryable=True,
+            details={"reason": "proxy_error"},
+        )
     if isinstance(exc, req_exc.ConnectionError):
         return TubeTraceError(
             ErrorCode.UPSTREAM_ERROR,
@@ -390,4 +449,5 @@ __all__ = [
     "TimeoutSession",
     "YouTubeTranscriptApiProvider",
     "classify_exception",
+    "proxy_dict",
 ]

@@ -59,6 +59,10 @@ Tests in `tests/unit`, `tests/integration` (in-memory MCP, ASGI, real HTTP e2e, 
 - Transcript provider is behind `providers.base.TranscriptProvider`; the sync library runs in a
   bounded thread pool with a fresh timeout-enforcing `requests.Session` per attempt.
   Blocking (`UPSTREAM_BLOCKED`) must never be reported as "no subtitles".
+- `TRANSCRIPT_PROXY_URL` (optional, secret) applies ONLY to the transcript provider's
+  `requests` sessions (passed per request so env proxies cannot override it). Never route the
+  Google search client through it; never log or print it (only `host:port`). With a proxy,
+  `UPSTREAM_BLOCKED` is retryable within the normal retry bounds; without one it is not.
 - Pagination contract: `index` = position in the full transcript, time range filters first,
   then offset/limit; size-limited pages set `next_offset` to what was actually returned;
   an empty page with the same offset is never returned (single oversized segment -> error).

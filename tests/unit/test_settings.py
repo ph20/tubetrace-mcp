@@ -108,3 +108,46 @@ def test_bearer_mode_is_the_default_and_stays_fail_closed() -> None:
         make_settings(app_env="production", auth_disabled=False, mcp_domain="mcp.example.com")
     with pytest.raises(ValidationError, match="Authentication is not configured"):
         make_settings(auth_disabled=False)
+
+
+def test_transcript_proxy_url() -> None:
+    assert make_settings(transcript_proxy_url="  ").transcript_proxy_url is None
+    unset = make_settings()
+    assert unset.transcript_proxy_configured is False
+    assert unset.transcript_proxy_endpoint is None
+
+    url = "http://customer-user-cc-US:pa%24s-w0rd@pr.oxylabs.io:7777"
+    settings = make_settings(transcript_proxy_url=url)
+    assert settings.transcript_proxy_configured is True
+    assert settings.transcript_proxy_endpoint == "pr.oxylabs.io:7777"
+    assert "pa%24s" not in repr(settings)
+    secrets = settings.redaction_secrets()
+    assert url in secrets
+    assert "pa%24s-w0rd" in secrets
+    assert "pa$s-w0rd" in secrets
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("socks5://user:hunter22@proxy.example:1080", "http:// or https://"),
+        ("http://user:hunter22@proxy.example", "host and a port"),
+        ("http://user:hunter22@proxy.example:7777/path", "path, query or fragment"),
+        ("http://user:hunter22@proxy.example:notaport", "not a valid URL"),
+    ],
+)
+def test_transcript_proxy_url_rejected_without_echoing_it(value: str, message: str) -> None:
+    with pytest.raises(ValidationError, match=message) as info:
+        make_settings(transcript_proxy_url=value)
+    assert "hunter22" not in str(info.value)
+
+
+def test_model_level_errors_do_not_echo_secrets() -> None:
+    with pytest.raises(ValidationError) as info:
+        make_settings(
+            auth_disabled=False,
+            youtube_api_key="AIzaSySecretValue123",
+            transcript_proxy_url="http://user:hunter22@proxy.example:7777",
+        )
+    assert "AIzaSySecretValue123" not in str(info.value)
+    assert "hunter22" not in str(info.value)

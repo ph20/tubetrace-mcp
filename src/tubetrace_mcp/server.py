@@ -275,6 +275,11 @@ def build_state(
             retry_budget_seconds=settings.upstream_retry_budget_seconds,
             max_segments=settings.transcript_max_segments,
             max_bytes=settings.transcript_max_bytes,
+            proxy_url=(
+                settings.transcript_proxy_url.get_secret_value()
+                if settings.transcript_proxy_url is not None
+                else None
+            ),
         )
 
     cache: TTLCache[Any] = TTLCache(
@@ -334,6 +339,7 @@ def create_server(
                 "auth_enabled": settings.auth_enabled,
                 "google_configured": settings.google_configured,
                 "provider": state.transcript_service.provider_name,
+                "transcript_proxy": settings.transcript_proxy_endpoint,
             },
         )
         try:

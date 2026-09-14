@@ -69,3 +69,11 @@ def test_configure_logging_routes_fastmcp_and_uvicorn_through_root() -> None:
         assert logging.getLogger(name).handlers == []
         assert logging.getLogger(name).propagate is True
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_url_credentials_are_redacted() -> None:
+    redactor = SecretRedactor()
+    text = "ProxyError: Unable to connect to proxy http://customer-user:pw1@pr.oxylabs.io:7777/"
+    redacted = redactor.redact(text)
+    assert "pw1" not in redacted
+    assert "http://customer-user:[REDACTED]@pr.oxylabs.io:7777/" in redacted

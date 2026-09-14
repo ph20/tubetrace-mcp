@@ -44,6 +44,7 @@ def cmd_serve(_: argparse.Namespace) -> int:
             "auth_mode": settings.auth_mode,
             "auth_enabled": settings.auth_enabled,
             "google_configured": settings.google_configured,
+            "transcript_proxy": settings.transcript_proxy_endpoint,
             "allowed_hosts": settings.effective_allowed_hosts,
         },
     )
@@ -105,6 +106,11 @@ def cmd_check_config(_: argparse.Namespace) -> int:
     print(f"token digests      : {len(settings.token_digests)} configured")
     print(
         f"google search      : {'configured' if settings.google_configured else 'NOT configured'}"
+    )
+    proxy = settings.transcript_proxy_endpoint
+    print(
+        "transcript proxy   : "
+        + (f"{proxy} (transcripts only)" if proxy else "not configured (direct connection)")
     )
     print(f"MCP_DOMAIN         : {settings.mcp_domain or '-'}")
     print(
