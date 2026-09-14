@@ -15,6 +15,7 @@ uv run tubetrace-mcp generate-token   # client token + server digest
 uv run tubetrace-mcp check-config     # validate env without starting
 uv run tubetrace-mcp serve            # reads .env; dev needs AUTH_DISABLED=true or MCP_TOKEN_SHA256
 uv build                              # wheel + sdist
+APP_ENV=production AUTH_MODE=platform uv run fastmcp inspect horizon.py:mcp   # Prefect Horizon view
 docker compose -f compose.dev.yaml up --build   # HTTP on 127.0.0.1:8000
 docker compose up -d --build                    # production: Caddy 80/443 + app
 ```
@@ -26,7 +27,10 @@ docker compose up -d --build                    # production: Caddy 80/443 + app
 `ratelimit.py`, `auth.py` (SHA-256 bearer verifier), `search_client.py` (Google),
 `providers/` (`TranscriptProvider` protocol + youtube-transcript-api implementation),
 `services/` (selection, pagination, search/transcript services), `server.py` (factory + tools),
-`cli.py`. Tests in `tests/unit`, `tests/integration` (in-memory MCP, ASGI, real HTTP e2e), `tests/live`.
+`cli.py`. Root `horizon.py` (+ `fastmcp.json`) is the Prefect Horizon entrypoint (`horizon.py:mcp`):
+a module-level FastMCP object built from env, absolute imports only, no transport code.
+Tests in `tests/unit`, `tests/integration` (in-memory MCP, ASGI, real HTTP e2e, Horizon entrypoint),
+`tests/live`.
 
 ## Invariants (do not break)
 
@@ -39,6 +43,15 @@ docker compose up -d --build                    # production: Caddy 80/443 + app
 - The client bearer token is never stored on the server; only `MCP_TOKEN_SHA256` digests.
   Production (`APP_ENV=production`) must fail to start without a digest; tokens are never
   read from query strings. Do not replace `Sha256TokenVerifier` with Static/Debug verifiers.
+  The only exception is the explicit `AUTH_MODE=platform` (managed gateway such as Prefect
+  Horizon authenticates callers): no in-process verifier, and `MCP_TOKEN_SHA256` /
+  `AUTH_DISABLED` must then be unset (an error otherwise). Never make `platform` the default
+  and never infer it from the environment.
+- `horizon.py` must stay importable with only env vars: no network, no `.env` dependency, no
+  relative imports (Horizon loads it as a standalone file), and it must expose `mcp` at module
+  level. Horizon runs the FastMCP object itself (stateful sessions handled by its gateway,
+  170 s request timeout, 6 MB payloads); `create_app` options (Caddy, Host guard, body limit)
+  do not apply there.
 - One tool call == at most one upstream request page (plus bounded retries). No hidden
   auto-pagination, no fetching transcripts for search results, no N+1.
 - Transcript provider is behind `providers.base.TranscriptProvider`; the sync library runs in a

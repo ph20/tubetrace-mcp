@@ -41,6 +41,7 @@ def cmd_serve(_: argparse.Namespace) -> int:
             "app_env": settings.app_env,
             "host": settings.host,
             "port": settings.port,
+            "auth_mode": settings.auth_mode,
             "auth_enabled": settings.auth_enabled,
             "google_configured": settings.google_configured,
             "allowed_hosts": settings.effective_allowed_hosts,
@@ -100,7 +101,7 @@ def cmd_check_config(_: argparse.Namespace) -> int:
     print(f"tubetrace-mcp {__version__}")
     print(f"APP_ENV            : {settings.app_env}")
     print(f"listen             : {settings.host}:{settings.port} (path /mcp, stateless HTTP)")
-    print(f"auth               : {'enabled' if settings.auth_enabled else 'DISABLED (dev only)'}")
+    print(f"auth               : {settings.auth_summary}")
     print(f"token digests      : {len(settings.token_digests)} configured")
     print(
         f"google search      : {'configured' if settings.google_configured else 'NOT configured'}"

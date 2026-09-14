@@ -330,6 +330,7 @@ def create_server(
             "server_started",
             extra={
                 "app_env": settings.app_env,
+                "auth_mode": settings.auth_mode,
                 "auth_enabled": settings.auth_enabled,
                 "google_configured": settings.google_configured,
                 "provider": state.transcript_service.provider_name,
@@ -344,7 +345,11 @@ def create_server(
             logger.info("server_stopped")
 
     auth = Sha256TokenVerifier(settings.token_digests) if settings.auth_enabled else None
-    if auth is None:
+    if settings.auth_mode == "platform":
+        # The managed gateway (e.g. Prefect Horizon) authenticates callers; this process must
+        # only be reachable through it. Logged at INFO because it is an explicit, valid choice.
+        logger.info("auth_delegated_to_platform", extra={"app_env": settings.app_env})
+    elif auth is None:
         logger.warning(
             "auth_disabled",
             extra={"app_env": settings.app_env, "host": settings.host, "port": settings.port},

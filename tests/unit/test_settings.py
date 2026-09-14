@@ -82,3 +82,29 @@ def test_domain_validation_and_env_parsing(monkeypatch: pytest.MonkeyPatch) -> N
     settings = make_settings(auth_disabled=False)
     assert settings.allowed_origins == ["https://app.example", "https://other.example"]
     assert settings.token_digests == [DIGEST]
+
+
+def test_platform_mode_delegates_auth_to_gateway() -> None:
+    """AUTH_MODE=platform: no in-process verification, no digest or domain required."""
+    settings = make_settings(app_env="production", auth_disabled=False, auth_mode="platform")
+    assert settings.auth_mode == "platform"
+    assert settings.auth_enabled is False
+    assert settings.token_digests == []
+    assert "platform" in settings.auth_summary
+    dev = make_settings(app_env="development", auth_disabled=False, auth_mode="platform")
+    assert dev.auth_enabled is False
+
+
+def test_platform_mode_rejects_ambiguous_auth_settings() -> None:
+    with pytest.raises(ValidationError, match="AUTH_DISABLED has no effect"):
+        make_settings(auth_disabled=True, auth_mode="platform")
+    with pytest.raises(ValidationError, match="MCP_TOKEN_SHA256 is ignored"):
+        make_settings(auth_disabled=False, auth_mode="platform", mcp_token_sha256=DIGEST)
+
+
+def test_bearer_mode_is_the_default_and_stays_fail_closed() -> None:
+    assert make_settings(auth_disabled=False, mcp_token_sha256=DIGEST).auth_mode == "bearer"
+    with pytest.raises(ValidationError, match="AUTH_MODE=platform"):
+        make_settings(app_env="production", auth_disabled=False, mcp_domain="mcp.example.com")
+    with pytest.raises(ValidationError, match="Authentication is not configured"):
+        make_settings(auth_disabled=False)

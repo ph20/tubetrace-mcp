@@ -8,7 +8,10 @@ Three kinds of values are distinguished:
 * **non-secret parameters** - hostnames, ports, limits, timeouts and cache settings.
 
 Validation is fail-closed: an invalid or missing auth configuration stops startup
-instead of silently allowing anonymous access.
+instead of silently allowing anonymous access. ``AUTH_MODE=platform`` is the one
+explicit exception: it declares that a managed MCP gateway (for example Prefect
+Horizon with Horizon authentication enabled) authenticates callers before requests
+reach this process, so no in-process bearer verification is performed.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 AppEnv = Literal["development", "production"]
+AuthMode = Literal["bearer", "platform"]
 
 
 def _split_csv(value: Any) -> list[str]:
@@ -89,6 +93,15 @@ class Settings(BaseSettings):
         default=False,
         description="Development only: explicitly allow anonymous access on loopback.",
     )
+    auth_mode: AuthMode = Field(
+        default="bearer",
+        description=(
+            "bearer: this process verifies Authorization: Bearer tokens against MCP_TOKEN_SHA256. "
+            "platform: a managed MCP gateway (e.g. Prefect Horizon) authenticates callers and "
+            "this process performs no token verification; only valid when the process is not "
+            "reachable except through that gateway."
+        ),
+    )
 
     # --- upstream timeouts, retries, concurrency -------------------------------------
     google_api_base_url: str = "https://www.googleapis.com/youtube/v3"
@@ -149,6 +162,19 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_auth(self) -> Settings:
         digests = self.token_digests
+        if self.auth_mode == "platform":
+            if self.auth_disabled:
+                raise ValueError(
+                    "AUTH_DISABLED has no effect when AUTH_MODE=platform; remove it so the "
+                    "configuration stays unambiguous."
+                )
+            if digests:
+                raise ValueError(
+                    "MCP_TOKEN_SHA256 is ignored when AUTH_MODE=platform (the gateway "
+                    "authenticates callers). Remove the digest, or set AUTH_MODE=bearer to "
+                    "verify tokens in this process."
+                )
+            return self
         if self.app_env == "production":
             if self.auth_disabled:
                 raise ValueError(
@@ -158,7 +184,8 @@ class Settings(BaseSettings):
             if not digests:
                 raise ValueError(
                     "MCP_TOKEN_SHA256 is required when APP_ENV=production. Generate it with "
-                    "'tubetrace-mcp generate-token'."
+                    "'tubetrace-mcp generate-token'. Only when a managed MCP gateway such as "
+                    "Prefect Horizon authenticates callers, set AUTH_MODE=platform instead."
                 )
             if not self.mcp_domain and not self.allowed_hosts:
                 raise ValueError(
@@ -168,7 +195,8 @@ class Settings(BaseSettings):
         elif not digests and not self.auth_disabled:
             raise ValueError(
                 "Authentication is not configured. Set MCP_TOKEN_SHA256 (see "
-                "'tubetrace-mcp generate-token') or, for local development only, "
+                "'tubetrace-mcp generate-token'), set AUTH_MODE=platform behind a managed "
+                "MCP gateway such as Prefect Horizon, or, for local development only, "
                 "set AUTH_DISABLED=true explicitly."
             )
         return self
@@ -189,9 +217,19 @@ class Settings(BaseSettings):
 
     @property
     def auth_enabled(self) -> bool:
+        """True when this process verifies bearer tokens itself (``AUTH_MODE=bearer``)."""
+        if self.auth_mode == "platform":
+            return False
         if self.app_env == "production":
             return True
         return not self.auth_disabled
+
+    @property
+    def auth_summary(self) -> str:
+        """Human-readable auth posture for logs and ``check-config``."""
+        if self.auth_mode == "platform":
+            return "delegated to the platform gateway (AUTH_MODE=platform)"
+        return "bearer (SHA-256 digest)" if self.auth_enabled else "DISABLED (dev only)"
 
     @property
     def effective_allowed_hosts(self) -> list[str]:

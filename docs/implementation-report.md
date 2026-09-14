@@ -113,9 +113,32 @@ Claude Code documentation (`claude mcp add --transport http … --header`).
 - FastMCP installs its own RichHandler on the `fastmcp` logger; `configure_logging` reroutes it to
   the root JSON formatter with redaction.
 
+## 6a. Prefect Horizon compatibility (added 2026-09-14)
+
+- Added `horizon.py` (entrypoint `horizon.py:mcp`, module-level FastMCP object from the shared
+  factory, absolute imports, no transport code), `fastmcp.json` (entrypoint, Python 3.12,
+  project install from `uv.lock`), `AUTH_MODE=bearer|platform` in `settings.py` (platform mode:
+  gateway-managed auth, no in-process verifier, digest/`AUTH_DISABLED` rejected, `MCP_DOMAIN`
+  not required), `default-groups = []` in `pyproject.toml` so the frozen `uv sync` on Horizon
+  installs only runtime dependencies, a CI step running `fastmcp inspect horizon.py:mcp`, tests
+  (`tests/integration/test_horizon_entrypoint.py`, settings and CLI cases) and a README section.
+- Verified locally: `AUTH_MODE=platform APP_ENV=production uv run fastmcp inspect horizon.py:mcp`
+  reports the server with 3 tools (the same inspection Horizon runs at build time); the test
+  suite loads the entrypoint through FastMCP's `FileSystemSource` exactly like the CLI does.
+- Not verified: an actual deployment on Horizon (requires a Horizon account and the GitHub app),
+  the behaviour of the transcript provider from Horizon's AWS egress addresses (likely
+  `UPSTREAM_BLOCKED`), and whether Horizon forwards the client `Authorization` header when
+  Horizon authentication is disabled (the README describes that variant as documented by
+  Horizon, not as tested).
+- Sources: gofastmcp.com/deployment/prefect-horizon; docs.horizon.prefect.io (quickstart,
+  platform/build-system, platform/compute-model, gateway, platform/authentication,
+  environment-variables, limits, platform/networking); introspection of FastMCP 4.0.3
+  (`fastmcp.cli.run`, `FileSystemSource`, `run_http_async`).
+
 ## 7. Files
 
-Key files: `pyproject.toml`, `uv.lock`, `src/tubetrace_mcp/**`, `tests/**`, `Dockerfile`,
+Key files: `pyproject.toml`, `uv.lock`, `src/tubetrace_mcp/**`, `tests/**`, `horizon.py`,
+`fastmcp.json`, `Dockerfile`,
 `compose.yaml`, `compose.dev.yaml`, `Caddyfile`, `.env.example`, `.github/workflows/ci.yml`,
 `examples/client.py`, `examples/codex-config.toml`, `README.md`, `AGENTS.md`, this report.
 The local `.env` contains the real key and must **not** end up in the repository (it is in

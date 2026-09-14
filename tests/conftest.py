@@ -23,6 +23,7 @@ ENV_VARS = [
     "YOUTUBE_API_KEY",
     "MCP_TOKEN_SHA256",
     "AUTH_DISABLED",
+    "AUTH_MODE",
     "MCP_DOMAIN",
     "ACME_EMAIL",
     "ALLOWED_HOSTS",

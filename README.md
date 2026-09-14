@@ -8,8 +8,10 @@ A personal **read-only MCP server** for YouTube:
 
 The server runs on **FastMCP 4** (Streamable HTTP, endpoint `/mcp`, stateless), is protected by a
 **bearer token** (only its SHA-256 digest is stored on the server) and is published through
-**Caddy** with automatic HTTPS (Let's Encrypt). No databases, queues, LLMs or paid transcript
-services.
+**Caddy** with automatic HTTPS (Let's Encrypt). It can also be deployed as-is to
+**[Prefect Horizon](https://www.prefect.io/horizon)**, the managed MCP platform from the FastMCP
+team (entrypoint `horizon.py:mcp`, see [Deploying to Prefect Horizon](#deploying-to-prefect-horizon)).
+No databases, queues, LLMs or paid transcript services.
 
 > The verification status, including what could not be verified in the development
 > environment, is documented in [docs/implementation-report.md](docs/implementation-report.md).
@@ -26,6 +28,7 @@ services.
 - [uv commands and tests](#uv-commands-and-tests)
 - [Docker](#docker)
 - [HTTPS with Caddy (production)](#https-with-caddy-production)
+- [Deploying to Prefect Horizon](#deploying-to-prefect-horizon)
 - [Authentication: client token and server digest](#authentication-client-token-and-server-digest)
 - [Connecting clients (Codex, Claude Code, FastMCP)](#connecting-clients-codex-claude-code-fastmcp)
 - [MCP tools](#mcp-tools)
@@ -176,6 +179,7 @@ The full list with defaults is in [`.env.example`](.env.example).
 | protection | `ALLOWED_HOSTS`, `ALLOWED_ORIGINS` | extra Host/Origin values (comma-separated). CLI clients without an Origin pass; a foreign Origin is rejected (403), a foreign Host gets 421. |
 | proxy | `PROXY_HEADERS`, `FORWARDED_ALLOW_IPS` | trust `X-Forwarded-*` only from your own Caddy (compose assigns the static address `172.28.0.10`). |
 | dev-only | `AUTH_DISABLED` | `true` disables auth **only** in development; in production it is a startup error. |
+| auth mode | `AUTH_MODE` | `bearer` (default): this process verifies the bearer token. `platform`: a managed MCP gateway (Prefect Horizon with Horizon authentication enabled) authenticates callers; no in-process verification, `MCP_TOKEN_SHA256`/`AUTH_DISABLED` must be unset and `MCP_DOMAIN` is not required. Only for processes that are unreachable except through that gateway. |
 | logs | `LOG_LEVEL`, `LOG_FORMAT` | JSON (default) or text; secrets are redacted. |
 | upstream | `GOOGLE_*_TIMEOUT_SECONDS`, `TRANSCRIPT_*_TIMEOUT_SECONDS`, `UPSTREAM_MAX_RETRIES`, `UPSTREAM_RETRY_BUDGET_SECONDS`, `UPSTREAM_MAX_CONCURRENCY`, `UPSTREAM_QUEUE_TIMEOUT_SECONDS`, `TOOL_TIMEOUT_SECONDS` | connect/read timeouts on the real HTTP clients, bounded retries with backoff/jitter, the concurrent upstream request limit, the time budget of one call. |
 | cache | `SEARCH_CACHE_TTL_SECONDS` (300), `TRANSCRIPT_CACHE_TTL_SECONDS` (3600), `CACHE_MAX_ENTRIES`, `CACHE_MAX_BYTES` | bounded LRU+TTL cache; errors are never cached. |
@@ -296,6 +300,95 @@ image directly with `APP_ENV=production`, `HOST=0.0.0.0`, the platform's `PORT`,
 `MCP_DOMAIN=<public hostname>` (for the Host check) and `FORWARDED_ALLOW_IPS` set to the
 platform's proxy addresses (or `*` if the application port is reachable only through that proxy).
 
+## Deploying to Prefect Horizon
+
+[Prefect Horizon](https://www.prefect.io/horizon) is the managed MCP platform built by the
+FastMCP team: it clones a GitHub repository, installs the dependencies, imports a Python file
+containing a FastMCP server, runs it as an HTTP MCP server at `https://<name>.fastmcp.app/mcp`
+and puts its own OAuth gateway in front of it. Details were checked on 2026-09-14 against the
+[FastMCP guide](https://gofastmcp.com/deployment/prefect-horizon) and the
+[Horizon documentation](https://docs.horizon.prefect.io/) (build system, compute model, gateway,
+authentication, environment variables, limits).
+
+**What the repository provides for it:**
+
+- [`horizon.py`](horizon.py) — the entrypoint (`horizon.py:mcp`): a module-level FastMCP object
+  built with the same factory as the self-hosted server (same tools, schemas, error codes,
+  caches, rate limit and logging). Horizon ignores the `if __name__ == "__main__"` block, the
+  Dockerfile, Caddy and `tubetrace-mcp serve`; it runs the object itself.
+- [`fastmcp.json`](fastmcp.json) — declares the entrypoint, Python 3.12 and the project
+  (`pyproject.toml` + `uv.lock`, frozen `uv sync`; the `dev` group is not installed because
+  `default-groups = []`). The same file makes `uv run fastmcp inspect` and `uv run fastmcp run`
+  work without arguments locally.
+- `AUTH_MODE=platform` — the explicit configuration for "Horizon authenticates callers" (see
+  below). Without it the build fails with a clear configuration error instead of producing an
+  unauthenticated server.
+- A CI step that runs `fastmcp inspect horizon.py:mcp` with the Horizon configuration, i.e. the
+  same inspection Horizon performs at build time.
+
+**Steps:**
+
+1. Push the repository to GitHub (public or private).
+2. Sign in at [horizon.prefect.io](https://horizon.prefect.io) with GitHub, create a hosted
+   server from the repository and set the **entrypoint** to `horizon.py:mcp`. Keep **Horizon
+   authentication** enabled (the default): only signed-in members of your Horizon organisation,
+   or Horizon API keys, can call the server.
+3. Before the first build, add the **environment variables** (Settings → Environment Variables;
+   they are encrypted and available at build and run time):
+
+   | Variable | Value | Why |
+   |---|---|---|
+   | `APP_ENV` | `production` | fail-closed validation |
+   | `AUTH_MODE` | `platform` | Horizon's gateway authenticates callers; no in-process bearer token |
+   | `YOUTUBE_API_KEY` | your Google key | optional; only `youtube_search_videos` needs it |
+   | `LOG_FORMAT` | `json` (default) | Horizon captures stdout/stderr as server logs; secrets are redacted |
+
+   Do **not** set `MCP_TOKEN_SHA256`, `AUTH_DISABLED`, `MCP_DOMAIN`, `HOST` or `PORT`: the first
+   two are rejected in platform mode, the rest are owned by Horizon. Variable names starting with
+   `FASTMCP_CLOUD_` or `HORIZON_` are reserved by the platform.
+4. Deploy. Horizon builds (dependency install → `fastmcp inspect` of the entrypoint → artifact),
+   publishes `https://<name>.fastmcp.app/mcp`, redeploys on every push to `main` and builds
+   preview deployments for pull requests. Test with the built-in Inspector or ChatMCP, then use
+   the connection snippets Horizon shows for Claude Code, Cursor, Claude Desktop, etc. — the
+   client authenticates through Horizon's OAuth, not with `TUBETRACE_MCP_TOKEN`.
+
+Check locally what Horizon will see at build time:
+
+```bash
+APP_ENV=production AUTH_MODE=platform uv run fastmcp inspect horizon.py:mcp
+```
+
+(If your local `.env` sets `AUTH_DISABLED=true` or a digest, also pass `AUTH_DISABLED=false
+MCP_TOKEN_SHA256=` — real environment variables override `.env`, and platform mode refuses an
+ambiguous configuration on purpose.)
+
+**Alternative: keep the bearer token on Horizon.** If you disable Horizon authentication for the
+server (Developer/Enterprise plans), Horizon passes requests through unchanged and your server
+owns authentication again: set `AUTH_MODE=bearer` (or leave it unset), `MCP_TOKEN_SHA256` and
+`MCP_DOMAIN=<name>.fastmcp.app`, and clients send `Authorization: Bearer <token>` as for the
+self-hosted setup. Never disable Horizon authentication while `AUTH_MODE=platform` is set — the
+server would be public.
+
+**Behavioural differences on Horizon (from the platform documentation):**
+
+- Horizon runs the FastMCP object with its own HTTP settings: sessions are stateful and routed by
+  the gateway (`mcp-session-id`, 24 h TTL; the server itself keeps no per-session state), only
+  `POST /mcp` is forwarded (`GET`/`DELETE /mcp` answer 405 at the gateway), and the Caddy layer,
+  the strict Host/Origin guard, `MAX_REQUEST_BODY_BYTES` and `MCP_JSON_RESPONSE` from the
+  self-hosted setup do not apply. `/healthz` exists on the server but is not reachable through
+  the gateway.
+- Limits: 170 s per request end-to-end (`TOOL_TIMEOUT_SECONDS`, 45 s, stays well below), 6 MB
+  request/response, 1024 MB memory, ephemeral filesystem; compute starts on demand, so the first
+  request after idling is slower (`horizon.py` keeps import-time work small).
+- The cache and rate limit remain process-local; Horizon may run more than one instance.
+- Horizon runs in AWS `us-east-1` with shared egress addresses. The unofficial transcript
+  provider is often blocked from cloud IP ranges: `youtube_list_transcripts` and
+  `youtube_get_transcript` may return `UPSTREAM_BLOCKED` there while `youtube_search_videos`
+  (official API) keeps working. This server does not bypass blocks; see
+  [Unofficial transcript provider, blocking and legal notes](#unofficial-transcript-provider-blocking-and-legal-notes).
+- Horizon injects `horizon-actor*` headers with the verified caller identity; the server does not
+  read them (single-owner design), but they appear in Horizon's request logs.
+
 ## Authentication: client token and server digest
 
 - `uv run tubetrace-mcp generate-token` creates a token from **32 random bytes**
@@ -318,6 +411,12 @@ platform's proxy addresses (or `*` if the application port is reachable only thr
 This is not an OAuth authorization server: clients that require OAuth discovery/login are not
 supported. For development, `AUTH_DISABLED=true` works only with `APP_ENV=development` and only
 when set explicitly.
+
+If you need OAuth for clients, put the server behind a managed MCP gateway that provides it and
+set `AUTH_MODE=platform` (see [Deploying to Prefect Horizon](#deploying-to-prefect-horizon)):
+the gateway authenticates callers and this process performs no token verification. The mode
+is never inferred: it must be set explicitly, and setting `MCP_TOKEN_SHA256` or `AUTH_DISABLED`
+together with it is a startup error, so the configuration can never be ambiguous.
 
 ## Connecting clients (Codex, Claude Code, FastMCP)
 
@@ -538,6 +637,8 @@ redaction is also applied to exception text.
 |---|---|
 | Server does not start: `Authentication is not configured` | set `MCP_TOKEN_SHA256` or (dev only) `AUTH_DISABLED=true` |
 | `AUTH_DISABLED=true is not allowed when APP_ENV=production` | remove `AUTH_DISABLED` from `.env` |
+| `MCP_TOKEN_SHA256 is ignored when AUTH_MODE=platform` / `AUTH_DISABLED has no effect when AUTH_MODE=platform` | platform mode must be unambiguous: remove the digest / `AUTH_DISABLED`, or switch to `AUTH_MODE=bearer` |
+| Horizon build fails at the inspect step with `MCP_TOKEN_SHA256 is required` | set `AUTH_MODE=platform` (Horizon authentication enabled) or a digest (Horizon authentication disabled) in the Horizon environment variables, then rebuild |
 | `MCP_DOMAIN (or ALLOWED_HOSTS) must be set in production` | set `MCP_DOMAIN` |
 | 401 | the client token does not match the digest; verify with `hash-token`; a token in the query string never works |
 | 403 `Forbidden Origin` | a browser client with a foreign Origin; add it to `ALLOWED_ORIGINS` |
@@ -567,7 +668,11 @@ redaction is also applied to exception text.
 
 ## Known limitations
 
-- One worker, an in-memory cache and rate limit — no shared state between processes/replicas.
+- One worker, an in-memory cache and rate limit — no shared state between processes/replicas
+  (including several Horizon instances).
+- `AUTH_MODE=platform` trusts the network path: it is only safe when the process cannot be reached
+  except through the authenticating gateway. The server does not verify the gateway's identity
+  headers.
 - `total_results_estimate` is Google's estimate; the real pagination depth is smaller.
 - The provider's track order does not guarantee the "original" language.
 - The on-the-wire response is roughly twice `MAX_RESPONSE_BYTES`, because the structured content

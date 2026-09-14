@@ -31,6 +31,11 @@ jobs:
         run: uv run pytest -q
       - name: Build package
         run: uv build
+      - name: Prefect Horizon entrypoint (what Horizon inspects at build time)
+        env:
+          APP_ENV: production
+          AUTH_MODE: platform
+        run: uv run fastmcp inspect horizon.py:mcp --skip-env
 
   docker:
     name: Docker image, compose and Caddyfile validation

@@ -52,6 +52,22 @@ def test_check_config(
     monkeypatch.setenv("YOUTUBE_API_KEY", "AIzaSyFakeKeyForTests1234567890")
     assert main(["check-config"]) == 0
     out = capsys.readouterr().out
-    assert "auth               : enabled" in out
+    assert "auth               : bearer (SHA-256 digest)" in out
     assert "google search      : configured" in out
     assert "AIzaSy" not in out
+
+
+def test_check_config_platform_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The Prefect Horizon configuration: production, no digest, no domain, gateway auth."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_MODE", "platform")
+    assert main(["check-config"]) == 0
+    out = capsys.readouterr().out
+    assert "auth               : delegated to the platform gateway (AUTH_MODE=platform)" in out
+    assert "token digests      : 0 configured" in out
+    monkeypatch.setenv("MCP_TOKEN_SHA256", "c" * 64)
+    assert main(["check-config"]) == 2
+    assert "ignored when AUTH_MODE=platform" in capsys.readouterr().err
