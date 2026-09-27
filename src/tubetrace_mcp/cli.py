@@ -119,6 +119,8 @@ def cmd_check_config(_: argparse.Namespace) -> int:
     print(f"allowed origins    : {', '.join(settings.allowed_origins) or '(same-origin only)'}")
     print(f"json response      : {settings.mcp_json_response}")
     print(f"log                : {settings.log_level} / {settings.log_format}")
+    requests = settings.log_requests or "default (errors on Horizon, all elsewhere)"
+    print(f"request log        : {requests}")
     return 0
 
 

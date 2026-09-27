@@ -29,6 +29,14 @@ Where the fields come from (verified on a live Prefect Horizon deployment):
 
 Tool argument *names* are logged; values only with ``log_arguments=True``
 (``LOG_TOOL_ARGUMENTS=true``). Horizon Request Logs already keep full payloads.
+
+Which requests are logged at INFO is chosen with ``log_requests`` (``LOG_REQUESTS``):
+
+* ``all``: every request (the default when not on Horizon);
+* ``errors``: only failed requests (WARNING); successful ones go to DEBUG. This is the
+  default on Horizon, whose Traffic Logs already record every request with the actor,
+  client, method, tool, status, duration and payloads, so the console keeps what they
+  lack: failures with their server-side cause, tracebacks and cold starts.
 """
 
 from __future__ import annotations
@@ -56,6 +64,7 @@ logger = logging.getLogger("audit")
 _MAX_VALUE = 120
 _MAX_ARGUMENTS = 300
 _TRUE = frozenset({"1", "true", "yes", "on"})
+_REQUEST_LOG_MODES = ("all", "errors")
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
 _DEPLOYMENT = re.compile(r"/deployments/([0-9a-f-]{36})")
 _LOOPBACK = ("127.", "::1", "localhost")
@@ -100,11 +109,20 @@ def runtime_fields() -> dict[str, Any]:
 class AuditMiddleware(Middleware):
     """Log one ``mcp_request`` line per MCP request (see the module docstring)."""
 
-    def __init__(self, *, log_arguments: bool | None = None) -> None:
+    def __init__(
+        self, *, log_arguments: bool | None = None, log_requests: str | None = None
+    ) -> None:
         if log_arguments is None:
             log_arguments = os.environ.get("LOG_TOOL_ARGUMENTS", "").strip().lower() in _TRUE
-        self._log_arguments = log_arguments
         self._behind_horizon = behind_horizon()
+        if log_requests is None:
+            log_requests = os.environ.get("LOG_REQUESTS", "").strip().lower() or (
+                "errors" if self._behind_horizon else "all"
+            )
+        if log_requests not in _REQUEST_LOG_MODES:
+            raise ValueError(f"LOG_REQUESTS must be 'all' or 'errors', got {log_requests!r}")
+        self._log_arguments = log_arguments
+        self._log_requests = log_requests
         self._cold_start = True
 
     async def on_request(
@@ -165,7 +183,7 @@ class AuditMiddleware(Middleware):
         level = logging.INFO
         if fields["status"] != "ok":
             level = logging.WARNING
-        elif fields["method"] == "ping":
+        elif fields["method"] == "ping" or self._log_requests == "errors":
             level = logging.DEBUG
         logger.log(level, "mcp_request", extra=_record_safe(fields))
 

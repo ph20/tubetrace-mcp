@@ -84,7 +84,7 @@ async def test_horizon_user_identity_and_tool_fields(
     serve: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FASTMCP_CLOUD_URL", "https://tubetrace-abc123.fastmcp.app")
-    caplog.set_level(logging.INFO, logger="audit")
+    caplog.set_level(logging.DEBUG, logger="audit")
     url = serve()
     async with Client(StreamableHttpTransport(url, headers=GATEWAY_HEADERS)) as client:
         await client.call_tool("youtube_list_transcripts", {"video": VIDEO_ID})
@@ -93,7 +93,7 @@ async def test_horizon_user_identity_and_tool_fields(
         )
 
     ok, failed = audit_records(caplog, "tools/call")
-    assert ok.levelno == logging.INFO
+    assert ok.levelno == logging.DEBUG, "on Horizon successes are left to Traffic Logs"
     expected = {
         "tool": "youtube_list_transcripts",
         "status": "ok",
@@ -119,7 +119,7 @@ async def test_service_account_has_no_email_and_client_info_is_ignored_behind_ho
     serve: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FASTMCP_CLOUD_URL", "https://tubetrace-abc123.fastmcp.app")
-    caplog.set_level(logging.INFO, logger="audit")
+    caplog.set_level(logging.DEBUG, logger="audit")
     url = serve()
     headers = {
         "horizon-actor": "sa_7f3c",
@@ -201,3 +201,22 @@ def test_runtime_fields_on_horizon(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fields["memory_mb"] == 1024
     monkeypatch.delenv("FASTMCP_CLOUD_URL")
     assert "platform" not in runtime_fields()
+
+
+async def test_log_requests_all_logs_successes_at_info_on_horizon(
+    serve: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FASTMCP_CLOUD_URL", "https://tubetrace-abc123.fastmcp.app")
+    monkeypatch.setenv("LOG_REQUESTS", "all")
+    caplog.set_level(logging.INFO, logger="audit")
+    url = serve()
+    async with Client(StreamableHttpTransport(url, headers=GATEWAY_HEADERS)) as client:
+        await client.list_tools()
+    (record,) = audit_records(caplog, "tools/list")
+    assert record.levelno == logging.INFO
+
+
+def test_log_requests_rejects_unknown_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_REQUESTS", "some")
+    with pytest.raises(ValueError, match="LOG_REQUESTS"):
+        AuditMiddleware()

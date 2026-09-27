@@ -90,6 +90,14 @@ class Settings(BaseSettings):
         default=False,
         description="Log tool argument values in the audit line (only names by default).",
     )
+    log_requests: Literal["all", "errors"] | None = Field(
+        default=None,
+        description=(
+            "Which MCP requests get an INFO audit line: all, or errors only (successful ones "
+            "at DEBUG). Unset: errors on Prefect Horizon, whose Traffic Logs already record "
+            "every request, all elsewhere."
+        ),
+    )
 
     # --- secrets & auth ---------------------------------------------------------
     youtube_api_key: SecretStr | None = Field(
@@ -159,6 +167,7 @@ class Settings(BaseSettings):
         "mcp_domain",
         "acme_email",
         "transcript_proxy_url",
+        "log_requests",
         mode="before",
     )
     @classmethod

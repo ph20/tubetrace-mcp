@@ -350,7 +350,11 @@ def create_server(
         mask_error_details=True,
     )
     mcp.state = state  # type: ignore[attr-defined]
-    mcp.add_middleware(AuditMiddleware(log_arguments=settings.log_tool_arguments))
+    mcp.add_middleware(
+        AuditMiddleware(
+            log_arguments=settings.log_tool_arguments, log_requests=settings.log_requests
+        )
+    )
 
     @mcp.tool(
         name="youtube_search_videos",

@@ -184,7 +184,7 @@ The full list with defaults is in [`.env.example`](.env.example).
 | proxy | `PROXY_HEADERS`, `FORWARDED_ALLOW_IPS` | trust `X-Forwarded-*` only from your own Caddy (compose assigns the static address `172.28.0.10`). |
 | dev-only | `AUTH_DISABLED` | `true` disables auth **only** in development; in production it is a startup error. |
 | auth mode | `AUTH_MODE` | `bearer` (default): this process verifies the bearer token. `platform`: a managed MCP gateway (Prefect Horizon with Horizon authentication enabled) authenticates callers; no in-process verification, `MCP_TOKEN_SHA256`/`AUTH_DISABLED` must be unset and `MCP_DOMAIN` is not required. Only for processes that are unreachable except through that gateway. |
-| logs | `LOG_LEVEL`, `LOG_FORMAT`, `LOG_TOOL_ARGUMENTS` | `text` (default) or `json`, one format for every line; one `mcp_request` line per MCP request with the caller identity; secrets are redacted. See [Logs](#logs). |
+| logs | `LOG_LEVEL`, `LOG_FORMAT`, `LOG_REQUESTS`, `LOG_TOOL_ARGUMENTS` | `text` (default) or `json`, one format for every line; one `mcp_request` line per MCP request with the caller identity (on Horizon only failed requests by default); secrets are redacted. See [Logs](#logs). |
 | upstream | `GOOGLE_*_TIMEOUT_SECONDS`, `TRANSCRIPT_*_TIMEOUT_SECONDS`, `UPSTREAM_MAX_RETRIES`, `UPSTREAM_RETRY_BUDGET_SECONDS`, `UPSTREAM_MAX_CONCURRENCY`, `UPSTREAM_QUEUE_TIMEOUT_SECONDS`, `TOOL_TIMEOUT_SECONDS` | connect/read timeouts on the real HTTP clients, bounded retries with backoff/jitter, the concurrent upstream request limit, the time budget of one call. |
 | cache | `SEARCH_CACHE_TTL_SECONDS` (300), `TRANSCRIPT_CACHE_TTL_SECONDS` (3600), `CACHE_MAX_ENTRIES`, `CACHE_MAX_BYTES` | bounded LRU+TTL cache; errors are never cached. |
 | limits | `MAX_RESPONSE_BYTES` (200,000), `TRANSCRIPT_MAX_SEGMENTS`, `TRANSCRIPT_MAX_BYTES`, `GOOGLE_MAX_RESPONSE_BYTES`, `MAX_REQUEST_BODY_BYTES`, `RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST` | size of one MCP result page, of an incoming transcript, of HTTP bodies, and a simple per-process rate limit. |
@@ -377,6 +377,7 @@ authentication, environment variables, limits).
    | `AUTH_MODE` | `platform` | Horizon's gateway authenticates callers; no in-process bearer token |
    | `YOUTUBE_API_KEY` | your Google key | optional; only `youtube_search_videos` needs it |
    | `LOG_FORMAT` | `text` (default) | Horizon shows raw stdout/stderr as server logs; `text` reads best there (JSON is shown as one raw line); secrets are redacted |
+   | `LOG_REQUESTS` | `errors` (default on Horizon) | only failed requests are logged; Traffic Logs already record every request. `all` logs successful ones too |
 
    Do **not** set `MCP_TOKEN_SHA256`, `AUTH_DISABLED`, `MCP_DOMAIN`, `HOST` or `PORT`: the first
    two are rejected in platform mode, the rest are owned by Horizon. Variable names starting with
@@ -677,7 +678,12 @@ the same fields). FastMCP, uvicorn and MCP SDK lines are routed through the same
 secrets are redacted from every rendered line. `logging_config.py` and `audit.py` are shared
 verbatim with rabotaua-mcp, so both servers log identically.
 
-Each MCP request produces one `mcp_request` line (`AuditMiddleware`):
+Each MCP request produces one `mcp_request` line (`AuditMiddleware`). `LOG_REQUESTS` chooses
+which of them are logged at INFO: `all` (default when self-hosted) or `errors` (default on
+Prefect Horizon): failed requests at WARNING, successful ones at DEBUG. Horizon's Traffic Logs
+already record every request with the actor, client, method, tool, status, duration and
+payloads, so the console keeps what they lack: failures with their server-side cause,
+tracebacks and cold starts (`server_started`).
 
 ```text
 2026-09-26T19:29:59.565Z WARNING audit mcp_request method=tools/call tool=youtube_search_videos status=error error=GOOGLE_API_NOT_CONFIGURED latency_ms=5.9 user=agrynchuk@gmail.com actor=user role=admin client=ClaudeCode ua=Claude-User arguments=query retryable=false request_id=81be2f8d9e6127cfda1fbce579dc0abf
