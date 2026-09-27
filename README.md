@@ -701,7 +701,11 @@ tracebacks and cold starts (`server_started`).
 
 uvicorn access lines are dropped for loopback peers: on Horizon every request comes from the
 Lambda Web Adapter on 127.0.0.1 (plus its `GET /` readiness probe), which says nothing about the
-caller. Self-hosted access lines for real peers are kept, in the same format.
+caller. Self-hosted access lines for real peers are kept, in the same format. uvicorn's INFO lines about
+starting and stopping ("Application startup complete", logged under the name `uvicorn.error`
+although they are not errors) are hidden too, with the MCP SDK's session-manager ones:
+`server_started` and `server_stopped` mark an instance's lifecycle. Warnings and errors still
+show, and `LOG_LEVEL=DEBUG` shows everything.
 
 ## Troubleshooting
 

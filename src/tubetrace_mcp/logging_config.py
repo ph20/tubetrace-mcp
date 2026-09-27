@@ -78,8 +78,9 @@ _GENERIC_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # A text value is written bare when it cannot be confused with the key=value layout.
 _BARE_VALUE = re.compile(r"^[^\s\"=]+$")
-# Raised to WARNING. The MCP SDK's streamable_http logs only "Terminating session: None"
-# at INFO (on Horizon once per cold start); everything else it logs is an error.
+# Raised to WARNING. At INFO the MCP SDK's streamable_http modules only log transport and
+# session-manager start/stop ("Terminating session: None", "StreamableHTTP session manager
+# started"); their warnings and errors still show.
 _NOISY_LOGGERS = (
     "httpx",
     "httpx2",
@@ -88,6 +89,7 @@ _NOISY_LOGGERS = (
     "urllib3",
     "hpack",
     "mcp.server.streamable_http",
+    "mcp.server.streamable_http_manager",
 )
 _ROUTED_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "fastmcp", "FastMCP")
 
@@ -212,6 +214,20 @@ class DropLoopbackAccessLog(logging.Filter):
         return True
 
 
+class DropUvicornLifecycleLog(logging.Filter):
+    """Drop uvicorn's INFO lines about starting and stopping; keep its warnings and errors.
+
+    uvicorn logs "Started server process", "Application startup complete", "Shutting
+    down" and the like at INFO on the logger named ``uvicorn.error``, so with the logger
+    name shown they read like errors, on every cold start. ``server_started`` and
+    ``server_stopped`` already mark when an instance starts and stops. A filter rather
+    than a level, because ``uvicorn.Config`` resets that logger's level to INFO.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.WARNING
+
+
 def _route_uvicorn_default_config_through_root() -> None:
     """Make uvicorn's *default* dictConfig keep its loggers routed through root.
 
@@ -260,11 +276,16 @@ def configure_logging(
         other.propagate = True
         other.setLevel(logging.NOTSET)
         other.disabled = False
-    access = logging.getLogger("uvicorn.access")
-    for existing in [f for f in access.filters if isinstance(f, DropLoopbackAccessLog)]:
-        access.removeFilter(existing)
-    if level != "DEBUG":
-        access.addFilter(DropLoopbackAccessLog())
+    # Logger filters survive the dictConfig that uvicorn.Config applies later; DEBUG shows all.
+    for logger_name, filter_type in (
+        ("uvicorn.access", DropLoopbackAccessLog),
+        ("uvicorn.error", DropUvicornLifecycleLog),
+    ):
+        target = logging.getLogger(logger_name)
+        for existing in [f for f in target.filters if isinstance(f, filter_type)]:
+            target.removeFilter(existing)
+        if level != "DEBUG":
+            target.addFilter(filter_type())
     _route_uvicorn_default_config_through_root()
     # FastMCP must not re-install its Rich handler later (``fastmcp run --log-level`` or
     # ``deployment.log_level`` in fastmcp.json), and its startup banner is a Rich panel
