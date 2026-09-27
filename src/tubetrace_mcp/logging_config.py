@@ -78,7 +78,17 @@ _GENERIC_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # A text value is written bare when it cannot be confused with the key=value layout.
 _BARE_VALUE = re.compile(r"^[^\s\"=]+$")
-_NOISY_LOGGERS = ("httpx", "httpx2", "httpcore", "httpcore2", "urllib3", "hpack")
+# Raised to WARNING. The MCP SDK's streamable_http logs only "Terminating session: None"
+# at INFO (on Horizon once per cold start); everything else it logs is an error.
+_NOISY_LOGGERS = (
+    "httpx",
+    "httpx2",
+    "httpcore",
+    "httpcore2",
+    "urllib3",
+    "hpack",
+    "mcp.server.streamable_http",
+)
 _ROUTED_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "fastmcp", "FastMCP")
 
 

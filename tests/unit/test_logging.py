@@ -77,6 +77,7 @@ def test_configure_logging_routes_fastmcp_and_uvicorn_through_root() -> None:
         assert logging.getLogger(name).handlers == []
         assert logging.getLogger(name).propagate is True
     assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("mcp.server.streamable_http").level == logging.WARNING
 
 
 def test_url_credentials_are_redacted() -> None:
