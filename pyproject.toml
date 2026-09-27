@@ -16,7 +16,7 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP",
 ]
 dependencies = [
-  "fastmcp>=4.0.3,<5",
+  "fastmcp>=4.0.10,<5",
   "httpx>=0.28.1,<1",
   "pydantic>=2.13,<3",
   "pydantic-settings>=2.15,<3",

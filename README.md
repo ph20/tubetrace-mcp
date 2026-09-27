@@ -34,6 +34,7 @@ No databases, queues, LLMs or paid transcript services.
 - [MCP tools](#mcp-tools)
 - [Pagination and fetching a full transcript in a loop](#pagination-and-fetching-a-full-transcript-in-a-loop)
 - [Errors](#errors)
+- [Logs](#logs)
 - [Troubleshooting](#troubleshooting)
 - [Unofficial transcript provider, blocking and legal notes](#unofficial-transcript-provider-blocking-and-legal-notes)
 - [Known limitations](#known-limitations)
@@ -183,7 +184,7 @@ The full list with defaults is in [`.env.example`](.env.example).
 | proxy | `PROXY_HEADERS`, `FORWARDED_ALLOW_IPS` | trust `X-Forwarded-*` only from your own Caddy (compose assigns the static address `172.28.0.10`). |
 | dev-only | `AUTH_DISABLED` | `true` disables auth **only** in development; in production it is a startup error. |
 | auth mode | `AUTH_MODE` | `bearer` (default): this process verifies the bearer token. `platform`: a managed MCP gateway (Prefect Horizon with Horizon authentication enabled) authenticates callers; no in-process verification, `MCP_TOKEN_SHA256`/`AUTH_DISABLED` must be unset and `MCP_DOMAIN` is not required. Only for processes that are unreachable except through that gateway. |
-| logs | `LOG_LEVEL`, `LOG_FORMAT` | JSON (default) or text; secrets are redacted. |
+| logs | `LOG_LEVEL`, `LOG_FORMAT`, `LOG_TOOL_ARGUMENTS` | `text` (default) or `json`, one format for every line; one `mcp_request` line per MCP request with the caller identity; secrets are redacted. See [Logs](#logs). |
 | upstream | `GOOGLE_*_TIMEOUT_SECONDS`, `TRANSCRIPT_*_TIMEOUT_SECONDS`, `UPSTREAM_MAX_RETRIES`, `UPSTREAM_RETRY_BUDGET_SECONDS`, `UPSTREAM_MAX_CONCURRENCY`, `UPSTREAM_QUEUE_TIMEOUT_SECONDS`, `TOOL_TIMEOUT_SECONDS` | connect/read timeouts on the real HTTP clients, bounded retries with backoff/jitter, the concurrent upstream request limit, the time budget of one call. |
 | cache | `SEARCH_CACHE_TTL_SECONDS` (300), `TRANSCRIPT_CACHE_TTL_SECONDS` (3600), `CACHE_MAX_ENTRIES`, `CACHE_MAX_BYTES` | bounded LRU+TTL cache; errors are never cached. |
 | limits | `MAX_RESPONSE_BYTES` (200,000), `TRANSCRIPT_MAX_SEGMENTS`, `TRANSCRIPT_MAX_BYTES`, `GOOGLE_MAX_RESPONSE_BYTES`, `MAX_REQUEST_BODY_BYTES`, `RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST` | size of one MCP result page, of an incoming transcript, of HTTP bodies, and a simple per-process rate limit. |
@@ -375,7 +376,7 @@ authentication, environment variables, limits).
    | `APP_ENV` | `production` | fail-closed validation |
    | `AUTH_MODE` | `platform` | Horizon's gateway authenticates callers; no in-process bearer token |
    | `YOUTUBE_API_KEY` | your Google key | optional; only `youtube_search_videos` needs it |
-   | `LOG_FORMAT` | `json` (default) | Horizon captures stdout/stderr as server logs; secrets are redacted |
+   | `LOG_FORMAT` | `text` (default) | Horizon shows raw stdout/stderr as server logs; `text` reads best there (JSON is shown as one raw line); secrets are redacted |
 
    Do **not** set `MCP_TOKEN_SHA256`, `AUTH_DISABLED`, `MCP_DOMAIN`, `HOST` or `PORT`: the first
    two are rejected in platform mode, the rest are owned by Horizon. Variable names starting with
@@ -421,8 +422,10 @@ server would be public.
   `youtube_get_transcript` may start returning `UPSTREAM_BLOCKED` at any time while
   `youtube_search_videos` (official API) keeps working. This server does not bypass blocks; see
   [Unofficial transcript provider, blocking and legal notes](#unofficial-transcript-provider-blocking-and-legal-notes).
-- Horizon injects `horizon-actor*` headers with the verified caller identity; the server does not
-  read them (single-owner design), but they appear in Horizon's request logs.
+- Horizon injects `horizon-actor*` headers with the verified caller identity; the `mcp_request`
+  log line shows them (`user`, `actor`, `role`, see [Logs](#logs)). The client IP is not available
+  on Horizon: uvicorn only sees the Lambda Web Adapter on 127.0.0.1 and the gateway sends no
+  `X-Forwarded-For`.
 
 ## Authentication: client token and server digest
 
@@ -665,6 +668,34 @@ and auth errors follow the MCP/HTTP rules (401/403/421/413, JSON-RPC error).
 Logs are structured (JSON): `request_id`, `tool`, `latency_ms`, `provider`, `cache_hit`,
 `error_code`, `status`. `Authorization`, the API key, full transcripts and `.env` are never logged;
 redaction is also applied to exception text.
+
+## Logs
+
+Everything the server writes goes to stderr in one format, chosen with `LOG_FORMAT`: `text`
+(default: `<time> <LEVEL> <logger> <message> key=value ...`) or `json` (one object per line with
+the same fields). FastMCP, uvicorn and MCP SDK lines are routed through the same formatter, and
+secrets are redacted from every rendered line. `logging_config.py` and `audit.py` are shared
+verbatim with rabotaua-mcp, so both servers log identically.
+
+Each MCP request produces one `mcp_request` line (`AuditMiddleware`):
+
+```text
+2026-09-26T19:29:59.565Z WARNING audit mcp_request method=tools/call tool=youtube_search_videos status=error error=GOOGLE_API_NOT_CONFIGURED latency_ms=5.9 user=agrynchuk@gmail.com actor=user role=admin client=ClaudeCode ua=Claude-User arguments=query retryable=false request_id=81be2f8d9e6127cfda1fbce579dc0abf
+```
+
+| field | source |
+|---|---|
+| `user`, `actor`, `role` | Horizon gateway headers `horizon-actor-email` (`horizon-actor` for service accounts, which have no email), `horizon-actor-type`, `horizon-user-role`; the gateway strips client-supplied `horizon-*` headers. Self-hosted: the bearer token's client id. Otherwise `anonymous`. |
+| `client`, `ua` | `x-anthropic-client` or the MCP `clientInfo` (ignored behind Horizon, where it is the gateway's own client), and `User-Agent`. Client-reported. |
+| `ip` | Self-hosted only: the peer uvicorn resolved (`X-Forwarded-For` from a proxy in `FORWARDED_ALLOW_IPS`). Never available on Horizon. |
+| `arguments` | Argument names; values only with `LOG_TOOL_ARGUMENTS=true` (Horizon Request Logs keep full payloads anyway). |
+| `request_id` | The W3C `traceparent` trace id (the same id the Horizon gateway, AWS X-Ray and Lambda use), else random. Every other line logged during the request carries it. |
+| `cache_hit`, `provider`, `retryable` | Added by the tool with `annotate()`. |
+| `cold_start` | `true` on the first request a process serves. |
+
+uvicorn access lines are dropped for loopback peers: on Horizon every request comes from the
+Lambda Web Adapter on 127.0.0.1 (plus its `GET /` readiness probe), which says nothing about the
+caller. Self-hosted access lines for real peers are kept, in the same format.
 
 ## Troubleshooting
 

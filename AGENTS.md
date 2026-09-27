@@ -68,4 +68,10 @@ Tests in `tests/unit`, `tests/integration` (in-memory MCP, ASGI, real HTTP e2e, 
   an empty page with the same offset is never returned (single oversized segment -> error).
 - Errors are never cached; caches/rate limits are process-local.
 - Tests must stay hermetic (fake provider + `httpx.MockTransport`); live tests are opt-in.
+- Logging: `logging_config.py` and `audit.py` are shared verbatim with rabotaua-mcp; keep the
+  copies identical. `AuditMiddleware` writes the only per-request line (`mcp_request`); tools add
+  fields with `annotate()` instead of logging their own per-call line. Never log `Authorization`,
+  tokens or tool argument values by default. Horizon's `fastmcp run` creates `uvicorn.Config`
+  after importing `horizon.py`, so `configure_logging` must keep rewriting uvicorn's default
+  `LOGGING_CONFIG` (covered by `tests/unit/test_logging.py`).
 - Everything is in English: code, identifiers, docstrings, tool descriptions, README and reports.

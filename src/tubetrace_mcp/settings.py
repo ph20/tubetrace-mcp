@@ -85,7 +85,11 @@ class Settings(BaseSettings):
         description="Answer MCP POST requests with application/json instead of SSE streams.",
     )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    log_format: Literal["json", "text"] = "json"
+    log_format: Literal["json", "text"] = "text"
+    log_tool_arguments: bool = Field(
+        default=False,
+        description="Log tool argument values in the audit line (only names by default).",
+    )
 
     # --- secrets & auth ---------------------------------------------------------
     youtube_api_key: SecretStr | None = Field(

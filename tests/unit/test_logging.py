@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 
+import fastmcp
+import pytest
+import uvicorn
+from fastmcp.utilities.logging import configure_logging as fastmcp_configure_logging
+
 from tubetrace_mcp.logging_config import (
+    DropLoopbackAccessLog,
     JsonFormatter,
     SecretRedactor,
     TextFormatter,
     configure_logging,
+    configure_logging_from_env,
     request_id_var,
 )
 
@@ -77,3 +85,65 @@ def test_url_credentials_are_redacted() -> None:
     redacted = redactor.redact(text)
     assert "pw1" not in redacted
     assert "http://customer-user:[REDACTED]@pr.oxylabs.io:7777/" in redacted
+
+
+def test_uvicorn_config_created_after_configure_keeps_routing() -> None:
+    """``fastmcp run`` (Prefect Horizon) creates uvicorn.Config after the entrypoint ran."""
+    configure_logging("INFO", "text")
+    uvicorn.Config(app=lambda *_: None, log_level="info")  # applies uvicorn's LOGGING_CONFIG
+    fastmcp_configure_logging("INFO")  # what `fastmcp run --log-level` does
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastmcp"):
+        logger = logging.getLogger(name)
+        assert logger.handlers == [], name
+        assert logger.propagate is True, name
+        assert logger.disabled is False, name
+    assert fastmcp.settings.show_server_banner is False
+    access_filters = logging.getLogger("uvicorn.access").filters
+    assert [type(f) for f in access_filters] == [DropLoopbackAccessLog]
+
+
+def test_loopback_access_lines_are_dropped_real_peers_kept() -> None:
+    def access(peer: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            __file__,
+            1,
+            '%s - "%s %s HTTP/%s" %d',
+            (peer, "POST", "/mcp", "1.1", 200),
+            None,
+        )
+
+    drop = DropLoopbackAccessLog()
+    assert drop.filter(access("127.0.0.1:44008")) is False
+    assert drop.filter(access("::1:44008")) is False
+    assert drop.filter(access("203.0.113.7:51234")) is True
+
+
+def test_text_formatter_layout_quotes_values_and_skips_none() -> None:
+    formatter = TextFormatter(SecretRedactor())
+    record = logging.LogRecord("audit", logging.INFO, __file__, 1, "mcp_request", None, None)
+    record.user = "agrynchuk@gmail.com"
+    record.ua = "Mozilla/5.0 (X11; Linux)"
+    record.ip = None
+    record.cold_start = True
+    record.request_id = "4bf92f3577b34da6a3ce929d0e0e4736"
+    line = formatter.format(record)
+    assert re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z INFO    audit mcp_request "
+        r'user=agrynchuk@gmail\.com ua="Mozilla/5\.0 \(X11; Linux\)" cold_start=true '
+        r"request_id=4bf92f3577b34da6a3ce929d0e0e4736",
+        line,
+    ), line
+
+
+def test_configure_logging_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_FORMAT", "JSON")
+    monkeypatch.setenv("LOG_LEVEL", "warning")
+    configure_logging_from_env()
+    root = logging.getLogger()
+    assert isinstance(root.handlers[0].formatter, JsonFormatter)
+    assert root.level == logging.WARNING
+    monkeypatch.setenv("LOG_FORMAT", "yaml")
+    with pytest.raises(ValueError, match="LOG_FORMAT"):
+        configure_logging_from_env()

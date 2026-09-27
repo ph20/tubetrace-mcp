@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,7 +17,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 import httpx
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent, ToolAnnotations
 from pydantic import BaseModel, Field, ValidationError
@@ -28,10 +27,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from . import __version__
+from .audit import AuditMiddleware, annotate, runtime_fields
 from .auth import Sha256TokenVerifier
 from .cache import TTLCache
 from .errors import ErrorCode, TubeTraceError
-from .logging_config import request_id_var
 from .middleware import MaxBodySizeMiddleware
 from .providers.base import TranscriptProvider
 from .providers.youtube_transcript_api import YouTubeTranscriptApiProvider
@@ -156,20 +155,14 @@ def validate_request[TModel: BaseModel](model: type[TModel], data: dict[str, Any
 
 async def execute_tool(
     name: str,
-    ctx: Context | None,
     state: AppState,
     run: Callable[[], Awaitable[BaseModel]],
 ) -> ToolResult:
-    """Common wrapper: rate limit, time budget, structured logging, error mapping."""
-    request_id = None
-    if ctx is not None:
-        try:
-            request_id = str(ctx.request_id)
-        except Exception:  # pragma: no cover - no active request context
-            request_id = None
-    token = request_id_var.set(request_id)
-    started = time.perf_counter()
-    log_fields: dict[str, Any] = {"tool": name}
+    """Common wrapper: rate limit, time budget, error mapping.
+
+    The per-call log line is written by ``AuditMiddleware``; this only adds the
+    tool's own fields to it (cache hit, provider, retryability) via ``annotate``.
+    """
     try:
         wait = state.limiter.try_acquire()
         if wait is not None:
@@ -188,30 +181,16 @@ async def execute_tool(
                 "The tool call exceeded the server's time budget.",
                 retryable=True,
             ) from None
-        log_fields.update(
-            latency_ms=round((time.perf_counter() - started) * 1000, 1),
-            status="ok",
+        annotate(
             cache_hit=getattr(result, "cache_hit", None),
             provider=getattr(result, "provider", None),
         )
-        logger.info("tool_call", extra=log_fields)
         return success_result(result)
     except TubeTraceError as err:
-        log_fields.update(
-            latency_ms=round((time.perf_counter() - started) * 1000, 1),
-            status="error",
-            error_code=str(err.code),
-            retryable=err.retryable,
-        )
-        logger.warning("tool_call", extra=log_fields)
+        annotate(retryable=err.retryable)
         return error_result(err)
     except Exception:
-        log_fields.update(
-            latency_ms=round((time.perf_counter() - started) * 1000, 1),
-            status="error",
-            error_code=str(ErrorCode.UPSTREAM_ERROR),
-        )
-        logger.exception("tool_call_unexpected", extra=log_fields)
+        logger.exception("tool_unexpected_error", extra={"tool": name})
         return error_result(
             TubeTraceError(
                 ErrorCode.UPSTREAM_ERROR,
@@ -219,8 +198,6 @@ async def execute_tool(
                 details={"reason": "internal"},
             )
         )
-    finally:
-        request_id_var.reset(token)
 
 
 def build_state(
@@ -334,6 +311,9 @@ def create_server(
         logger.info(
             "server_started",
             extra={
+                "server": SERVER_NAME,
+                "version": __version__,
+                **runtime_fields(),
                 "app_env": settings.app_env,
                 "auth_mode": settings.auth_mode,
                 "auth_enabled": settings.auth_enabled,
@@ -370,6 +350,7 @@ def create_server(
         mask_error_details=True,
     )
     mcp.state = state  # type: ignore[attr-defined]
+    mcp.add_middleware(AuditMiddleware(log_arguments=settings.log_tool_arguments))
 
     @mcp.tool(
         name="youtube_search_videos",
@@ -431,7 +412,6 @@ def create_server(
         safe_search: Annotated[
             SafeSearch, Field(description="moderate (default), strict or none.")
         ] = SafeSearch.MODERATE,
-        ctx: Context | None = None,
     ) -> ToolResult:
         async def run() -> BaseModel:
             request = validate_request(
@@ -453,7 +433,7 @@ def create_server(
             )
             return await state.search_service.search(request)
 
-        return await execute_tool("youtube_search_videos", ctx, state, run)
+        return await execute_tool("youtube_search_videos", state, run)
 
     @mcp.tool(
         name="youtube_list_transcripts",
@@ -472,12 +452,11 @@ def create_server(
                 max_length=MAX_VIDEO_INPUT_LENGTH,
             ),
         ],
-        ctx: Context | None = None,
     ) -> ToolResult:
         async def run() -> BaseModel:
             return await state.transcript_service.list_transcripts(video)
 
-        return await execute_tool("youtube_list_transcripts", ctx, state, run)
+        return await execute_tool("youtube_list_transcripts", state, run)
 
     @mcp.tool(
         name="youtube_get_transcript",
@@ -522,7 +501,6 @@ def create_server(
             TranscriptFormat,
             Field(description="segments (timed entries) or text (this page's plain text)."),
         ] = TranscriptFormat.SEGMENTS,
-        ctx: Context | None = None,
     ) -> ToolResult:
         async def run() -> BaseModel:
             request = validate_request(
@@ -540,7 +518,7 @@ def create_server(
             )
             return await state.transcript_service.get_transcript(request)
 
-        return await execute_tool("youtube_get_transcript", ctx, state, run)
+        return await execute_tool("youtube_get_transcript", state, run)
 
     @mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
     async def healthz(request: Request) -> Response:
