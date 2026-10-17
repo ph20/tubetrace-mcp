@@ -23,7 +23,15 @@ from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "horizon.py"
-TOOL_NAMES = {"youtube_search_videos", "youtube_list_transcripts", "youtube_get_transcript"}
+TOOL_NAMES = {
+    "youtube_search_videos",
+    "youtube_get_video",
+    "youtube_get_channel",
+    "youtube_get_playlist",
+    "youtube_list_channel_playlists",
+    "youtube_list_transcripts",
+    "youtube_get_transcript",
+}
 
 
 @pytest.fixture
@@ -53,6 +61,16 @@ async def test_entrypoint_loads_like_the_fastmcp_cli_and_inspects() -> None:
     info = await inspect_fastmcp(server)
     assert {tool.name for tool in info.tools} == TOOL_NAMES
     assert info.name == "tubetrace-mcp"
+
+
+@pytest.mark.usefixtures("horizon_env")
+async def test_entrypoint_exposes_analyze_tool_when_llm_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRANSCRIPT_LLM_API_KEY", "test-gemini-key-1234567890")
+    server = await load_entrypoint()
+    info = await inspect_fastmcp(server)
+    assert {tool.name for tool in info.tools} == TOOL_NAMES | {"youtube_analyze_transcript"}
 
 
 @pytest.mark.usefixtures("horizon_env")

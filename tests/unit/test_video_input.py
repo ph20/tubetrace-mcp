@@ -3,9 +3,23 @@ from __future__ import annotations
 import pytest
 
 from tubetrace_mcp.errors import ErrorCode, TubeTraceError
-from tubetrace_mcp.video_input import canonical_video_url, parse_video_input, timestamp_url
+from tubetrace_mcp.video_input import (
+    ChannelTarget,
+    ParsedVideoInput,
+    canonical_channel_url,
+    canonical_playlist_url,
+    canonical_video_url,
+    parse_channel_input,
+    parse_iso8601_duration,
+    parse_playlist_input,
+    parse_video_input,
+    parse_video_with_playlist,
+    timestamp_url,
+)
 
 VID = "dQw4w9WgXcQ"
+CID = "UCuAXFkgsw1L7xaCfnd5JJOw"
+PID = "PL1234567890abcdef"
 
 
 @pytest.mark.parametrize(
@@ -64,7 +78,96 @@ def test_rejects_invalid_input(value: str, reason: str) -> None:
     assert info.value.details["reason"] == reason
 
 
-def test_helpers() -> None:
+def test_parse_video_with_playlist() -> None:
+    assert parse_video_with_playlist(VID) == ParsedVideoInput(video_id=VID, playlist_id=None)
+    assert parse_video_with_playlist(
+        f"https://www.youtube.com/watch?v={VID}&list={PID}&index=3"
+    ) == ParsedVideoInput(video_id=VID, playlist_id=PID)
+    # Non-playlist 'WL' (Watch Later) is ignored rather than failing video parsing
+    assert parse_video_with_playlist(
+        f"https://www.youtube.com/watch?v={VID}&list=WL"
+    ) == ParsedVideoInput(video_id=VID, playlist_id=None)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (CID, ChannelTarget(channel_id=CID)),
+        (f"  {CID}  ", ChannelTarget(channel_id=CID)),
+        (f"https://www.youtube.com/channel/{CID}", ChannelTarget(channel_id=CID)),
+        (f"https://www.youtube.com/channel/{CID}/videos", ChannelTarget(channel_id=CID)),
+        ("@PyConUS", ChannelTarget(handle="@PyConUS")),
+        ("https://www.youtube.com/@PyConUS", ChannelTarget(handle="@PyConUS")),
+        ("https://www.youtube.com/@PyConUS/playlists", ChannelTarget(handle="@PyConUS")),
+        ("www.youtube.com/@PyConUS", ChannelTarget(handle="@PyConUS")),
+    ],
+)
+def test_parse_channel_input_valid(value: str, expected: ChannelTarget) -> None:
+    assert parse_channel_input(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("", "empty"),
+        ("   ", "empty"),
+        ("UCshort", "invalid_channel_identifier"),
+        ("@ab", "invalid_channel_identifier"),
+        ("https://evil.example/@PyConUS", "host_not_allowed"),
+        (f"https://youtu.be/{VID}", "channel_not_found_in_url"),
+        (f"https://www.youtube.com/watch?v={VID}", "channel_not_found_in_url"),
+        ("https://www.youtube.com/channel/UCbad", "invalid_channel_id"),
+        ("javascript:alert(1)", "unsupported_scheme"),
+    ],
+)
+def test_parse_channel_input_invalid(value: str, reason: str) -> None:
+    with pytest.raises(TubeTraceError) as info:
+        parse_channel_input(value)
+    assert info.value.code == ErrorCode.INVALID_CHANNEL_INPUT
+    assert info.value.details["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        PID,
+        f"  {PID}  ",
+        f"https://www.youtube.com/playlist?list={PID}",
+        f"https://www.youtube.com/watch?v={VID}&list={PID}",
+        f"www.youtube.com/playlist?list={PID}",
+    ],
+)
+def test_parse_playlist_input_valid(value: str) -> None:
+    assert parse_playlist_input(value) == PID
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("", "empty"),
+        ("PLshort", "invalid_playlist_id"),
+        (f"https://www.youtube.com/watch?v={VID}", "playlist_id_not_found"),
+        ("https://www.youtube.com/playlist?list=WL", "playlist_id_not_found"),
+        (f"https://evil.example/playlist?list={PID}", "host_not_allowed"),
+    ],
+)
+def test_parse_playlist_input_invalid(value: str, reason: str) -> None:
+    with pytest.raises(TubeTraceError) as info:
+        parse_playlist_input(value)
+    assert info.value.code == ErrorCode.INVALID_PLAYLIST_INPUT
+    assert info.value.details["reason"] == reason
+
+
+def test_helpers_and_iso8601_duration() -> None:
     assert canonical_video_url(VID) == f"https://www.youtube.com/watch?v={VID}"
+    assert canonical_channel_url(CID) == f"https://www.youtube.com/channel/{CID}"
+    assert canonical_playlist_url(PID) == f"https://www.youtube.com/playlist?list={PID}"
     assert timestamp_url(VID, 65.9) == f"https://www.youtube.com/watch?v={VID}&t=65s"
     assert timestamp_url(VID, -3) == f"https://www.youtube.com/watch?v={VID}&t=0s"
+    assert parse_iso8601_duration("PT3M33S") == 213
+    assert parse_iso8601_duration("PT1H2M3S") == 3723
+    assert parse_iso8601_duration("P1DT2H") == 93600
+    assert parse_iso8601_duration("P0D") == 0
+    assert parse_iso8601_duration(None) is None
+    assert parse_iso8601_duration("invalid") is None
+    assert parse_iso8601_duration("PT") is None

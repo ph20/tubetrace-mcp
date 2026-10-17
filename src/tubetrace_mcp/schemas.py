@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -12,6 +13,8 @@ MAX_QUERY_LENGTH = 256
 MAX_VIDEO_INPUT_LENGTH = 2048
 MAX_PAGE_TOKEN_LENGTH = 512
 MAX_LANGUAGES = 10
+MAX_PROMPT_LENGTH = 4000
+PAGE_TOKEN_PATTERN = r"^[A-Za-z0-9_=\-]+$"  # noqa: S105 - regex pattern, not a secret
 
 PROVIDER_YOUTUBE_DATA_API = "youtube_data_api_v3"
 TOTAL_RESULTS_NOTE = (
@@ -19,6 +22,22 @@ TOTAL_RESULTS_NOTE = (
     "number of results that can actually be retrieved through pagination."
 )
 LANGUAGE_CODE_PATTERN = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+
+
+def _normalize_language_list(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    normalized: list[str] = []
+    for code in value:
+        code = code.strip()
+        if not re.match(LANGUAGE_CODE_PATTERN, code):
+            raise ValueError(f"invalid language code: {code!r}")
+        lowered = code.lower()
+        if lowered not in normalized:
+            normalized.append(lowered)
+    if not normalized:
+        raise ValueError("languages must not be empty when provided")
+    return normalized
 
 
 class SearchOrder(StrEnum):
@@ -68,7 +87,7 @@ class SearchVideosRequest(_StrictModel):
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     max_results: int = Field(default=10, ge=1, le=50)
     page_token: str | None = Field(
-        default=None, max_length=MAX_PAGE_TOKEN_LENGTH, pattern=r"^[A-Za-z0-9_=\-]+$"
+        default=None, max_length=MAX_PAGE_TOKEN_LENGTH, pattern=PAGE_TOKEN_PATTERN
     )
     channel_id: str | None = Field(default=None, pattern=r"^UC[A-Za-z0-9_\-]{22}$")
     published_after: AwareDatetime | None = None
@@ -108,6 +127,53 @@ class SearchVideosRequest(_StrictModel):
         return self.model_dump_json()
 
 
+class GetVideoRequest(_StrictModel):
+    """Validated parameters for fetching one video's metadata (and optional playlist summary)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    video: str = Field(min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+    playlist: str | None = Field(default=None, min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+
+
+class GetChannelRequest(_StrictModel):
+    """Validated parameters for fetching channel metadata and one page of uploads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    channel: str = Field(min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+    include_videos: bool = True
+    max_results: int = Field(default=20, ge=1, le=50)
+    page_token: str | None = Field(
+        default=None, max_length=MAX_PAGE_TOKEN_LENGTH, pattern=PAGE_TOKEN_PATTERN
+    )
+
+
+class GetPlaylistRequest(_StrictModel):
+    """Validated parameters for fetching playlist metadata and one page of items."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    playlist: str = Field(min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+    include_videos: bool = True
+    max_results: int = Field(default=25, ge=1, le=50)
+    page_token: str | None = Field(
+        default=None, max_length=MAX_PAGE_TOKEN_LENGTH, pattern=PAGE_TOKEN_PATTERN
+    )
+
+
+class ListChannelPlaylistsRequest(_StrictModel):
+    """Validated parameters for listing public playlists owned by a channel."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    channel: str = Field(min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+    max_results: int = Field(default=25, ge=1, le=50)
+    page_token: str | None = Field(
+        default=None, max_length=MAX_PAGE_TOKEN_LENGTH, pattern=PAGE_TOKEN_PATTERN
+    )
+
+
 class GetTranscriptRequest(_StrictModel):
     """Validated parameters for one transcript page."""
 
@@ -125,24 +191,55 @@ class GetTranscriptRequest(_StrictModel):
     @field_validator("languages")
     @classmethod
     def _normalize_languages(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        import re
-
-        normalized: list[str] = []
-        for code in value:
-            code = code.strip()
-            if not re.match(LANGUAGE_CODE_PATTERN, code):
-                raise ValueError(f"invalid language code: {code!r}")
-            lowered = code.lower()
-            if lowered not in normalized:
-                normalized.append(lowered)
-        if not normalized:
-            raise ValueError("languages must not be empty when provided")
-        return normalized
+        return _normalize_language_list(value)
 
     @model_validator(mode="after")
     def _check_time_range(self) -> GetTranscriptRequest:
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds <= self.start_seconds
+        ):
+            raise ValueError("end_seconds must be greater than start_seconds")
+        return self
+
+
+class AnalyzeTranscriptRequest(_StrictModel):
+    """Validated parameters for server-side single-pass transcript Q&A / analysis."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    video: str = Field(min_length=1, max_length=MAX_VIDEO_INPUT_LENGTH)
+    prompt: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
+    languages: list[str] | None = Field(default=None, max_length=MAX_LANGUAGES)
+    prefer_manual: bool = True
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+    output_language: str | None = Field(default=None, max_length=64)
+
+    @field_validator("prompt")
+    @classmethod
+    def _strip_prompt(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("prompt must not be blank")
+        return stripped
+
+    @field_validator("output_language")
+    @classmethod
+    def _strip_output_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("languages")
+    @classmethod
+    def _normalize_languages(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_language_list(value)
+
+    @model_validator(mode="after")
+    def _check_time_range(self) -> AnalyzeTranscriptRequest:
         if (
             self.start_seconds is not None
             and self.end_seconds is not None
@@ -202,6 +299,147 @@ class SearchVideosResult(BaseModel):
     total_results_note: str = TOTAL_RESULTS_NOTE
     region_code: str | None = None
     retrieved_at: datetime = Field(description="When the data was fetched from Google (UTC).")
+    cache_hit: bool = False
+
+
+class PlaylistSummary(BaseModel):
+    """Compact playlist metadata attached to a video when a playlist ID/URL is present."""
+
+    playlist_id: str
+    playlist_url: str
+    title: str
+    channel_id: str
+    channel_title: str
+    item_count: int | None = None
+
+
+class VideoMetadataResult(BaseModel):
+    provider: str = PROVIDER_YOUTUBE_DATA_API
+    video_id: str
+    video_url: str
+    title: str
+    description: str
+    channel_id: str
+    channel_title: str
+    channel_url: str
+    published_at: datetime | None = None
+    duration_iso: str | None = Field(
+        default=None, description="ISO-8601 duration reported by YouTube (e.g. 'PT3M33S')."
+    )
+    duration_seconds: int | None = Field(
+        default=None, description="Total video duration in seconds."
+    )
+    has_captions: bool | None = Field(
+        default=None,
+        description="Whether YouTube Data API contentDetails.caption reports captions available.",
+    )
+    definition: str | None = Field(
+        default=None, description="Video definition reported by YouTube ('hd' or 'sd')."
+    )
+    default_language: str | None = None
+    default_audio_language: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    category_id: str | None = None
+    view_count: int | None = None
+    like_count: int | None = None
+    comment_count: int | None = None
+    live_broadcast_content: str | None = None
+    thumbnail_url: str | None = None
+    playlist: PlaylistSummary | None = Field(
+        default=None,
+        description="Populated when the video URL contained list=... or 'playlist' was provided.",
+    )
+    retrieved_at: datetime
+    cache_hit: bool = False
+
+
+class PlaylistVideoItem(BaseModel):
+    """One video item inside a channel uploads playlist or a user playlist."""
+
+    position: int | None = None
+    video_id: str
+    video_url: str
+    title: str
+    description: str
+    video_owner_channel_id: str | None = None
+    video_owner_channel_title: str | None = None
+    published_at: datetime | None = Field(
+        default=None, description="Original video publish time (contentDetails.videoPublishedAt)."
+    )
+    added_at: datetime | None = Field(
+        default=None, description="When the item was added to the playlist (snippet.publishedAt)."
+    )
+    privacy_status: str | None = None
+    thumbnail_url: str | None = None
+
+
+class ChannelResult(BaseModel):
+    provider: str = PROVIDER_YOUTUBE_DATA_API
+    channel_id: str
+    channel_url: str
+    title: str
+    description: str
+    custom_url: str | None = Field(
+        default=None, description="Channel handle/custom URL such as '@channelname'."
+    )
+    country: str | None = None
+    published_at: datetime | None = None
+    thumbnail_url: str | None = None
+    subscriber_count: int | None = None
+    video_count: int | None = None
+    view_count: int | None = None
+    uploads_playlist_id: str | None = Field(
+        default=None, description="Playlist ID (UU...) containing all public channel uploads."
+    )
+    videos: list[PlaylistVideoItem] | None = Field(
+        default=None, description="Present when include_videos=true."
+    )
+    next_page_token: str | None = None
+    prev_page_token: str | None = None
+    retrieved_at: datetime
+    cache_hit: bool = False
+
+
+class PlaylistResult(BaseModel):
+    provider: str = PROVIDER_YOUTUBE_DATA_API
+    playlist_id: str
+    playlist_url: str
+    title: str
+    description: str
+    channel_id: str
+    channel_title: str
+    published_at: datetime | None = None
+    item_count: int | None = None
+    thumbnail_url: str | None = None
+    items: list[PlaylistVideoItem] | None = Field(
+        default=None, description="Present when include_videos=true."
+    )
+    next_page_token: str | None = None
+    prev_page_token: str | None = None
+    retrieved_at: datetime
+    cache_hit: bool = False
+
+
+class ChannelPlaylistItem(BaseModel):
+    playlist_id: str
+    playlist_url: str
+    title: str
+    description: str
+    item_count: int | None = None
+    published_at: datetime | None = None
+    thumbnail_url: str | None = None
+
+
+class ChannelPlaylistsResult(BaseModel):
+    provider: str = PROVIDER_YOUTUBE_DATA_API
+    channel_id: str
+    channel_url: str
+    playlists: list[ChannelPlaylistItem]
+    next_page_token: str | None = None
+    prev_page_token: str | None = None
+    results_per_page: int | None = None
+    total_results_estimate: int | None = None
+    retrieved_at: datetime
     cache_hit: bool = False
 
 
@@ -279,6 +517,43 @@ class TranscriptPage(BaseModel):
         default=None,
         description="Present when format=text: this page's segment texts joined by newlines.",
     )
+
+
+class TranscriptCitation(BaseModel):
+    """A timestamped reference returned by youtube_analyze_transcript."""
+
+    start_seconds: float
+    timestamp_url: str
+    label: str
+
+
+class LLMUsage(BaseModel):
+    """Token usage reported by the long-context LLM provider."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class AnalyzeTranscriptResult(BaseModel):
+    video_id: str
+    video_url: str
+    language: str
+    language_code: str
+    is_generated: bool
+    selection: str
+    transcript_provider: str
+    transcript_cache_hit: bool
+    llm_provider: str
+    llm_model: str
+    total_segments: int
+    analyzed_segments: int
+    transcript_characters: int
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+    answer: str
+    citations: list[TranscriptCitation] = Field(default_factory=list)
+    usage: LLMUsage | None = None
+    retrieved_at: datetime
 
 
 class HealthStatus(BaseModel):
