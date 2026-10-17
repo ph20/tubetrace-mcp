@@ -44,6 +44,7 @@ def cmd_serve(_: argparse.Namespace) -> int:
             "auth_mode": settings.auth_mode,
             "auth_enabled": settings.auth_enabled,
             "google_configured": settings.google_configured,
+            "llm_configured": settings.llm_configured,
             "transcript_proxy": settings.transcript_proxy_endpoint,
             "allowed_hosts": settings.effective_allowed_hosts,
         },
@@ -107,6 +108,12 @@ def cmd_check_config(_: argparse.Namespace) -> int:
     print(
         f"google search      : {'configured' if settings.google_configured else 'NOT configured'}"
     )
+    llm_summary = (
+        f"configured ({settings.transcript_llm_provider} / {settings.effective_llm_model})"
+        if settings.llm_configured
+        else "not configured (youtube_analyze_transcript hidden)"
+    )
+    print(f"transcript llm     : {llm_summary}")
     proxy = settings.transcript_proxy_endpoint
     print(
         "transcript proxy   : "

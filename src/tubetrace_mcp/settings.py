@@ -30,6 +30,11 @@ _PROXY_SCHEMES = frozenset({"http", "https"})
 
 AppEnv = Literal["development", "production"]
 AuthMode = Literal["bearer", "platform"]
+LLMProvider = Literal["gemini", "openai"]
+
+DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 def _split_csv(value: Any) -> list[str]:
@@ -51,7 +56,7 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
         # Validation errors are printed by check-config/serve; never echo raw input, which can
-        # contain YOUTUBE_API_KEY or the password inside TRANSCRIPT_PROXY_URL.
+        # contain YOUTUBE_API_KEY, TRANSCRIPT_LLM_API_KEY, or the password in TRANSCRIPT_PROXY_URL.
         hide_input_in_errors=True,
     )
 
@@ -129,6 +134,57 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- transcript subagent LLM (optional; hides youtube_analyze_transcript when unset) ---
+    transcript_llm_provider: LLMProvider = Field(
+        default="gemini",
+        description=(
+            "Long-context LLM provider for youtube_analyze_transcript: 'gemini' (Google "
+            "Generative Language REST API) or 'openai' (OpenAI-compatible /v1/chat/completions)."
+        ),
+    )
+    transcript_llm_api_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "API key for the long-context transcript analysis LLM. When unset, "
+            "youtube_analyze_transcript is not registered on the MCP server."
+        ),
+    )
+    transcript_llm_model: str | None = Field(
+        default=None,
+        description=(
+            "Model identifier for youtube_analyze_transcript (defaults to "
+            f"'{DEFAULT_GEMINI_MODEL}' when TRANSCRIPT_LLM_PROVIDER=gemini)."
+        ),
+    )
+    transcript_llm_base_url: str | None = Field(
+        default=None,
+        description="Optional base URL override for the transcript analysis LLM API.",
+    )
+    transcript_llm_max_input_chars: int = Field(
+        default=2_000_000,
+        ge=4096,
+        le=20_000_000,
+        description="Maximum formatted transcript characters sent to the LLM in a single pass.",
+    )
+    transcript_llm_max_output_tokens: int = Field(
+        default=4096,
+        ge=256,
+        le=65536,
+        description="Maximum output tokens requested from the transcript analysis LLM.",
+    )
+    transcript_llm_timeout_seconds: float = Field(
+        default=90.0,
+        gt=0,
+        le=300,
+        description="Read timeout for a single long-context LLM completion call.",
+    )
+    analysis_tool_timeout_seconds: float = Field(
+        default=110.0,
+        gt=0,
+        le=600,
+        description="Total time budget for youtube_analyze_transcript (transcript + LLM call).",
+    )
+
     # --- upstream timeouts, retries, concurrency -------------------------------------
     google_api_base_url: str = "https://www.googleapis.com/youtube/v3"
     google_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
@@ -167,6 +223,9 @@ class Settings(BaseSettings):
         "mcp_domain",
         "acme_email",
         "transcript_proxy_url",
+        "transcript_llm_api_key",
+        "transcript_llm_model",
+        "transcript_llm_base_url",
         "log_requests",
         mode="before",
     )
@@ -214,8 +273,36 @@ class Settings(BaseSettings):
             raise ValueError("TRANSCRIPT_PROXY_URL must not contain a path, query or fragment")
         return SecretStr(raw)
 
+    @field_validator("transcript_llm_base_url")
+    @classmethod
+    def _llm_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = value.strip().rstrip("/")
+        try:
+            parts = urlsplit(raw)
+            _ = parts.port
+        except ValueError:
+            raise ValueError("TRANSCRIPT_LLM_BASE_URL is not a valid URL") from None
+        if parts.scheme.lower() not in _PROXY_SCHEMES or not parts.hostname:
+            raise ValueError("TRANSCRIPT_LLM_BASE_URL must start with http:// or https://")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("TRANSCRIPT_LLM_BASE_URL must not embed credentials")
+        if parts.query or parts.fragment:
+            raise ValueError("TRANSCRIPT_LLM_BASE_URL must not contain a query or fragment")
+        return raw
+
     @model_validator(mode="after")
     def _validate_auth(self) -> Settings:
+        if (
+            self.llm_configured
+            and self.transcript_llm_provider == "openai"
+            and (not self.transcript_llm_model or not self.transcript_llm_model.strip())
+        ):
+            raise ValueError(
+                "TRANSCRIPT_LLM_MODEL is required when TRANSCRIPT_LLM_PROVIDER=openai."
+            )
+
         digests = self.token_digests
         if self.auth_mode == "platform":
             if self.auth_disabled:
@@ -300,6 +387,26 @@ class Settings(BaseSettings):
         )
 
     @property
+    def llm_configured(self) -> bool:
+        return self.transcript_llm_api_key is not None and bool(
+            self.transcript_llm_api_key.get_secret_value().strip()
+        )
+
+    @property
+    def effective_llm_model(self) -> str:
+        if self.transcript_llm_model and self.transcript_llm_model.strip():
+            return self.transcript_llm_model.strip()
+        return DEFAULT_GEMINI_MODEL
+
+    @property
+    def effective_llm_base_url(self) -> str:
+        if self.transcript_llm_base_url:
+            return self.transcript_llm_base_url
+        if self.transcript_llm_provider == "gemini":
+            return DEFAULT_GEMINI_BASE_URL
+        return DEFAULT_OPENAI_BASE_URL
+
+    @property
     def transcript_proxy_configured(self) -> bool:
         return self.transcript_proxy_url is not None
 
@@ -315,6 +422,8 @@ class Settings(BaseSettings):
         secrets: list[str] = []
         if self.youtube_api_key is not None:
             secrets.append(self.youtube_api_key.get_secret_value())
+        if self.transcript_llm_api_key is not None:
+            secrets.append(self.transcript_llm_api_key.get_secret_value())
         if self.transcript_proxy_url is not None:
             proxy_url = self.transcript_proxy_url.get_secret_value()
             secrets.append(proxy_url)

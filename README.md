@@ -47,16 +47,27 @@ No databases, queues, LLMs or paid transcript services.
 
 - `youtube_search_videos` — one page of `search.list` results per call
   (filters: channel, dates, order, language/region, duration, caption availability, safeSearch).
+- `youtube_get_video` — detailed metadata for a single video (`videos.list`, 1 quota unit from the
+  10,000/day bucket) without downloading the transcript; also resolves playlist summary metadata
+  if the URL includes `list=...` or an explicit `playlist` argument is provided.
+- `youtube_get_channel` — channel metadata (`channels.list`) plus one page of uploaded videos from
+  the channel's uploads playlist (`UU...` via `playlistItems.list`, 1 quota unit per call).
+- `youtube_get_playlist` — playlist metadata (`playlists.list`) plus one page of playlist items
+  (`playlistItems.list`).
+- `youtube_list_channel_playlists` — public playlists created by a channel (`playlists.list`).
 - `youtube_list_transcripts` — the available caption tracks without downloading their text.
 - `youtube_get_transcript` — one page of a transcript with timestamps or as plain text, with
   language selection, a time range, `offset`/`limit` and a configurable response size limit.
+- `youtube_analyze_transcript` *(conditional, registered only when `TRANSCRIPT_LLM_API_KEY` is set)* —
+  server-side single-pass transcript Q&A / summarization using a configurable long-context LLM
+  (`gemini` or `openai`-compatible) so raw caption pages do not flood the main agent's context.
 
 **What it deliberately does not do:**
 
-- it does not search for phrases **inside** transcripts (`caption_filter=closedCaption` only
-  selects videos that have captions);
+- it does not search for phrases **inside** transcripts across multiple videos (`caption_filter=closedCaption`
+  only selects videos that have captions);
 - no hidden auto-pagination, no downloading transcripts for all search results;
-- no audio/video downloads, ASR, translation or summarization;
+- no audio/video downloads or local ASR;
 - no `captions.download` (it requires OAuth and edit rights on the video);
 - no CAPTCHA solving, private-access bypassing or cookies; an optional HTTP(S) proxy can be set
   for transcript requests only (see [Transcript proxy](#transcript-proxy));
@@ -64,7 +75,8 @@ No databases, queues, LLMs or paid transcript services.
   scheme for clients that can send a static token.
 
 Transcripts and video descriptions are **untrusted third-party data**, not instructions for the
-server. The server never executes them and never processes them with an LLM.
+server. When `youtube_analyze_transcript` is enabled, the transcript is fenced inside
+`<untrusted_transcript>` tags and sent to a toolless LLM completion endpoint.
 
 ## Architecture
 
@@ -78,9 +90,10 @@ MCP client (Codex / Claude Code / FastMCP Client)
    tubetrace-mcp (uvicorn, 1 worker, /mcp stateless Streamable HTTP, /healthz)
      ├─ settings.py        env configuration, fail-closed auth
      ├─ auth.py            Sha256TokenVerifier (constant-time)
-     ├─ server.py          FastMCP factory, 3 tools (thin wrappers)
-     ├─ services/          track selection, pagination, cache, search/transcript services
+     ├─ server.py          FastMCP factory, 7 tools (+ conditional youtube_analyze_transcript)
+     ├─ services/          track selection, pagination, cache, search/metadata/transcript/analysis services
      ├─ search_client.py   httpx.AsyncClient → googleapis.com (key in the X-Goog-Api-Key header)
+     ├─ llm_client.py      httpx.AsyncClient → Gemini / OpenAI-compatible long-context LLM (optional)
      └─ providers/         TranscriptProvider (Protocol) + youtube-transcript-api in a bounded thread pool
                            (optional TRANSCRIPT_PROXY_URL applies to this traffic only)
 ```
@@ -176,6 +189,8 @@ The full list with defaults is in [`.env.example`](.env.example).
 |---|---|---|
 | server secret | `YOUTUBE_API_KEY` | Google key restricted to the YouTube Data API v3. Optional. |
 | server secret | `TRANSCRIPT_PROXY_URL` | `http(s)://user:password@host:port` proxy for **transcript requests only**; search never uses it. Optional. See [Transcript proxy](#transcript-proxy). |
+| server secret | `TRANSCRIPT_LLM_API_KEY` | API key for the optional long-context transcript analysis LLM (`youtube_analyze_transcript`). When unset, `youtube_analyze_transcript` is hidden from `tools/list`. |
+| llm config | `TRANSCRIPT_LLM_PROVIDER`, `TRANSCRIPT_LLM_MODEL`, `TRANSCRIPT_LLM_BASE_URL`, `TRANSCRIPT_LLM_MAX_INPUT_CHARS`, `TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS`, `TRANSCRIPT_LLM_TIMEOUT_SECONDS`, `ANALYSIS_TOOL_TIMEOUT_SECONDS` | Provider (`gemini` default, or `openai`), model (`gemini-3-flash-preview` default for Gemini), optional base URL override, character/token limits and timeouts for `youtube_analyze_transcript`. |
 | client credential (digest only) | `MCP_TOKEN_SHA256` | SHA-256 hex digest(s) of the bearer token, comma-separated for rotation. Required in production. |
 | mode | `APP_ENV` | `development` / `production` (fail-closed). |
 | network | `HOST`, `PORT` | application bind address (in Docker `0.0.0.0:8000`). |
@@ -536,6 +551,24 @@ Result: `items[]` (`video_id`, `video_url`, `title`, `description`, `channel_id`
 `retrieved_at`, `provider`, `cache_hit`. HTML entities in titles/descriptions are decoded;
 invalid dates in the response do not break the page (`published_at: null`).
 
+### `youtube_get_video`
+
+Fetches full metadata for a single video via `videos.list` (`part=snippet,contentDetails,statistics`, 1 quota unit from the 10,000/day bucket) without downloading the transcript:
+- Input: `video` (11-character ID or YouTube URL; if the URL contains `list=...`, playlist summary metadata is also resolved), optional `playlist` (explicit playlist ID or URL).
+- Output: `video_id`, `video_url`, `title`, `description`, `channel_id`, `channel_title`, `channel_url`, `published_at`, `duration_iso`, `duration_seconds`, `has_captions`, `definition`, `default_language`, `default_audio_language`, `tags`, `category_id`, `view_count`, `like_count`, `comment_count`, `live_broadcast_content`, `thumbnail_url`, `playlist` (`playlist_id`, `playlist_url`, `title`, `channel_id`, `channel_title`, `item_count`), `retrieved_at`, `cache_hit`.
+
+### `youtube_get_channel`
+
+Fetches channel metadata via `channels.list` (by `UC...` channel ID, `@handle`, or channel URL) and, when `include_videos=true` (default), one page of uploaded videos from the channel's `uploads` playlist (`UU...`) via `playlistItems.list` (1 quota unit per call). Channel metadata is cached independently so paginating with `page_token` performs only 1 upstream call.
+
+### `youtube_get_playlist`
+
+Fetches playlist metadata (`playlists.list`) and, when `include_videos=true` (default), one page of videos in the playlist (`playlistItems.list`). Pass `next_page_token` as `page_token` to paginate.
+
+### `youtube_list_channel_playlists`
+
+Lists public playlists created by a channel (`playlists.list` with `channelId=UC...`, one page per call).
+
 ### `youtube_list_transcripts`
 
 ```json
@@ -608,6 +641,10 @@ Examples:
 {"video": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "start_seconds": 60, "end_seconds": 120, "format": "text"}
 ```
 
+### `youtube_analyze_transcript` (conditional)
+
+Registered in `tools/list` **only** when `TRANSCRIPT_LLM_API_KEY` is configured on the server. Fetches (or reads from cache) the full transcript, optionally slices by `start_seconds`/`end_seconds`, fences the timed lines inside `<untrusted_transcript>` tags, and sends them with `prompt` in a single pass to the configured long-context LLM (`gemini` or `openai`-compatible). Returns `answer`, `citations[]` (`start_seconds`, `timestamp_url`, `label`), `usage`, and transcript/LLM metadata.
+
 ## Pagination and fetching a full transcript in a loop
 
 The full transcript is downloaded from upstream **once** and cached (1 hour by default); the
@@ -647,13 +684,18 @@ Expected failures are returned as an **MCP tool error** (`isError: true`) with t
 |---|---|---|
 | `INVALID_ARGUMENT` | invalid parameters (e.g. a date without a time zone, `end_seconds ≤ start_seconds`) | no |
 | `INVALID_VIDEO_INPUT` | neither an ID nor a URL from the allowlisted hosts | no |
+| `INVALID_CHANNEL_INPUT` | neither a `UC...` channel ID, `@handle`, nor an allowlisted YouTube channel URL | no |
+| `INVALID_PLAYLIST_INPUT` | neither a playlist ID nor an allowlisted YouTube URL with `list=...` | no |
 | `GOOGLE_API_NOT_CONFIGURED` | no `YOUTUBE_API_KEY`; transcripts keep working | no |
 | `GOOGLE_API_KEY_INVALID` | key invalid/forbidden, API not enabled | no |
 | `GOOGLE_QUOTA_EXCEEDED` | the project's daily quota is exhausted | no |
+| `VIDEO_NOT_FOUND` | video was not found by `videos.list` or is private | no |
+| `CHANNEL_NOT_FOUND` | channel was not found by `channels.list` | no |
+| `PLAYLIST_NOT_FOUND` | playlist was not found or is private | no |
 | `NO_MATCHING_TRANSCRIPT` | no track in the requested language (see `details.available`) | no |
 | `TRANSCRIPTS_DISABLED` | subtitles are disabled for the video | no |
 | `VIDEO_UNAVAILABLE` | video unavailable/private/age-restricted (`details.reason`) | no |
-| `TRANSCRIPT_TOO_LARGE` | transcript exceeds `TRANSCRIPT_MAX_SEGMENTS`/`TRANSCRIPT_MAX_BYTES` | no |
+| `TRANSCRIPT_TOO_LARGE` | transcript exceeds `TRANSCRIPT_MAX_SEGMENTS`/`TRANSCRIPT_MAX_BYTES`/`TRANSCRIPT_LLM_MAX_INPUT_CHARS` | no |
 | `RESPONSE_TOO_LARGE` | a single segment does not fit into `MAX_RESPONSE_BYTES` | no |
 | `RATE_LIMITED` | local per-process limit (`details.retry_after_seconds`) | yes |
 | `SERVER_BUSY` | the concurrent upstream request limit is exhausted | yes |
@@ -661,6 +703,7 @@ Expected failures are returned as an **MCP tool error** (`isError: true`) with t
 | `UPSTREAM_RATE_LIMITED` | 429 from Google/YouTube | yes |
 | `UPSTREAM_TIMEOUT` | upstream timeout or the tool time budget | yes |
 | `UPSTREAM_ERROR` | other upstream/network/parsing failure (`details.reason`) | depends |
+| `LLM_UPSTREAM_ERROR` | long-context LLM returned an error, invalid key, or rate limit | 429/5xx yes |
 
 JSON-schema validation errors of the arguments (for example `max_results: 51`) are also returned
 by FastMCP with `isError: true`, but with the pydantic validation text instead of a code. Protocol

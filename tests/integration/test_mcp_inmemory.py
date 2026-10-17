@@ -35,12 +35,18 @@ async def test_initialize_and_discovery(server: FastMCP[Any]) -> None:
         assert client.server_info is not None
         assert client.server_info.name == "tubetrace-mcp"
         assert client.instructions and "read-only" in client.instructions
+        assert "youtube_analyze_transcript" not in client.instructions
         tools = {tool.name: tool for tool in await client.list_tools()}
         assert set(tools) == {
             "youtube_search_videos",
+            "youtube_get_video",
+            "youtube_get_channel",
+            "youtube_get_playlist",
+            "youtube_list_channel_playlists",
             "youtube_list_transcripts",
             "youtube_get_transcript",
         }
+        assert "youtube_analyze_transcript" not in tools
         for tool in tools.values():
             assert tool.annotations is not None
             assert tool.annotations.read_only_hint is True
@@ -65,7 +71,7 @@ async def test_standard_handshake_mode_supports_ping(server: FastMCP[Any]) -> No
         assert await client.ping() is True
         assert client.initialize_result is not None
         assert client.initialize_result.server_info.name == "tubetrace-mcp"
-        assert len(await client.list_tools()) == 3
+        assert len(await client.list_tools()) == 7
 
 
 async def test_search_returns_structured_items(
@@ -289,3 +295,85 @@ async def test_tool_time_budget(mock_http: httpx.AsyncClient) -> None:
         )
         assert result.is_error is True
         assert decode_error(result.content[0].text)["code"] == "UPSTREAM_TIMEOUT"
+
+
+async def test_conditional_analyze_transcript_tool_and_metadata_tools(
+    fake_provider: FakeProvider, mock_http: httpx.AsyncClient, google_mock: GoogleMock
+) -> None:
+    from tests.unit.test_metadata_and_analysis import (
+        CHANNEL_ID,
+        PLAYLIST_ID,
+        channel_payload,
+        playlist_items_payload,
+        playlist_payload,
+        video_payload,
+    )
+    from tubetrace_mcp.llm_client import LLMAnalysisOutput, LLMCitation
+    from tubetrace_mcp.schemas import LLMUsage
+
+    class InMemoryLLM:
+        provider = "gemini"
+        model = "gemini-3-flash-preview"
+
+        async def analyze(
+            self,
+            *,
+            prompt: str,
+            formatted_transcript: str,
+            video_id: str,
+            language_code: str,
+            output_language: str | None = None,
+        ) -> LLMAnalysisOutput:
+            assert "[0s] word 0" in formatted_transcript
+            return LLMAnalysisOutput(
+                answer=f"Summary for {video_id}: {prompt}",
+                citations=[LLMCitation(start_seconds=4.0, label="Key point")],
+                usage=LLMUsage(input_tokens=120, output_tokens=30),
+            )
+
+    server = create_server(
+        make_settings(),
+        transcript_provider=fake_provider,
+        search_client=make_search_client(mock_http),
+        llm_client=InMemoryLLM(),
+    )
+    google_mock.queue(
+        httpx.Response(200, json=video_payload()),
+        httpx.Response(200, json=playlist_payload()),
+        httpx.Response(200, json=channel_payload()),
+        httpx.Response(200, json=playlist_items_payload(2)),
+    )
+    async with Client(server) as client:
+        assert client.instructions and "youtube_analyze_transcript" in client.instructions
+        tools = {t.name for t in await client.list_tools()}
+        assert "youtube_analyze_transcript" in tools
+        assert len(tools) == 8
+
+        analysis = await client.call_tool(
+            "youtube_analyze_transcript",
+            {"video": VIDEO_ID, "prompt": "What is the key point?"},
+        )
+        assert analysis.is_error is False
+        assert analysis.structured_content is not None
+        assert (
+            analysis.structured_content["answer"]
+            == f"Summary for {VIDEO_ID}: What is the key point?"
+        )
+        assert analysis.structured_content["citations"][0]["timestamp_url"].endswith("&t=4s")
+
+        vid = await client.call_tool(
+            "youtube_get_video",
+            {"video": f"https://www.youtube.com/watch?v={VIDEO_ID}&list={PLAYLIST_ID}"},
+        )
+        assert vid.is_error is False
+        assert vid.structured_content is not None
+        assert vid.structured_content["duration_seconds"] == 213
+        assert vid.structured_content["playlist"]["playlist_id"] == PLAYLIST_ID
+
+        ch = await client.call_tool(
+            "youtube_get_channel", {"channel": f"https://www.youtube.com/channel/{CHANNEL_ID}"}
+        )
+        assert ch.is_error is False
+        assert ch.structured_content is not None
+        assert ch.structured_content["channel_id"] == CHANNEL_ID
+        assert len(ch.structured_content["videos"]) == 2

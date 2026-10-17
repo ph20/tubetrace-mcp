@@ -153,6 +153,10 @@ async def test_fastmcp_client_handshake_discovery_and_calls(running_server: Runn
         tools = {t.name for t in await client.list_tools()}
         assert tools == {
             "youtube_search_videos",
+            "youtube_get_video",
+            "youtube_get_channel",
+            "youtube_get_playlist",
+            "youtube_list_channel_playlists",
             "youtube_list_transcripts",
             "youtube_get_transcript",
         }

@@ -9,7 +9,7 @@ transcript without any upstream call. Errors are never cached.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -37,6 +37,15 @@ class CachedTranscript:
 class CachedTracks:
     tracks: tuple[TranscriptTrack, ...]
     retrieved_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTranscript:
+    video_id: str
+    transcript: RawTranscript
+    selection: str
+    retrieved_at: datetime
+    cache_hit: bool
 
 
 class TranscriptService:
@@ -87,12 +96,18 @@ class TranscriptService:
             cache_hit=False,
         )
 
-    async def get_transcript(self, request: GetTranscriptRequest) -> TranscriptPage:
-        video_id = parse_video_input(request.video)
-        languages = tuple(request.languages) if request.languages else None
+    async def resolve_transcript(
+        self,
+        *,
+        video: str,
+        languages: Sequence[str] | None,
+        prefer_manual: bool,
+    ) -> ResolvedTranscript:
+        video_id = parse_video_input(video)
+        lang_tuple = tuple(languages) if languages else None
         spec_key = (
             f"resolve:{self._provider.name}:{video_id}:"
-            f"{','.join(languages) if languages else '*'}:{int(request.prefer_manual)}"
+            f"{','.join(lang_tuple) if lang_tuple else '*'}:{int(prefer_manual)}"
         )
         cached_entry: CachedTranscript | None = None
         track_key = self._cache.get(spec_key)
@@ -104,7 +119,7 @@ class TranscriptService:
         if cached_entry is None:
             transcript = await self._provider.fetch_transcript(
                 video_id,
-                lambda tracks: select_track(tracks, languages, request.prefer_manual),
+                lambda tracks: select_track(tracks, lang_tuple, prefer_manual),
             )
             retrieved_at = self._now()
             key = (transcript.language_code.lower(), transcript.is_generated)
@@ -122,17 +137,32 @@ class TranscriptService:
             retrieved_at = cached_entry.retrieved_at
             cache_hit = True
 
+        return ResolvedTranscript(
+            video_id=video_id,
+            transcript=transcript,
+            selection="requested_language" if lang_tuple else "default_policy",
+            retrieved_at=retrieved_at,
+            cache_hit=cache_hit,
+        )
+
+    async def get_transcript(self, request: GetTranscriptRequest) -> TranscriptPage:
+        resolved = await self.resolve_transcript(
+            video=request.video,
+            languages=request.languages,
+            prefer_manual=request.prefer_manual,
+        )
+        transcript = resolved.transcript
         page = build_page(transcript, request, max_bytes=self._max_response_bytes)
         return TranscriptPage(
-            video_id=video_id,
-            video_url=canonical_video_url(video_id),
+            video_id=resolved.video_id,
+            video_url=canonical_video_url(resolved.video_id),
             language=transcript.language,
             language_code=transcript.language_code,
             is_generated=transcript.is_generated,
-            selection="requested_language" if languages else "default_policy",
+            selection=resolved.selection,
             provider=self._provider.name,
-            retrieved_at=retrieved_at,
-            cache_hit=cache_hit,
+            retrieved_at=resolved.retrieved_at,
+            cache_hit=resolved.cache_hit,
             format=request.format,
             total_segments=page.total_segments,
             matched_segments=page.matched_segments,
