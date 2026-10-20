@@ -23,7 +23,7 @@ import httpx
 from .errors import ErrorCode, TubeTraceError
 from .retry import backoff_delay, parse_retry_after
 from .schemas import LLMUsage
-from .settings import LLMProvider
+from .settings import LLMProvider, LLMThinkingLevel
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,18 @@ def _parse_structured_output(raw_text: str) -> tuple[str, list[LLMCitation]]:
     return answer, citations
 
 
+def _truncated_output_error(provider: str, max_output_tokens: int) -> TubeTraceError:
+    # A truncated structured answer would otherwise surface as raw partial JSON with no citations.
+    return TubeTraceError(
+        ErrorCode.LLM_UPSTREAM_ERROR,
+        "The transcript analysis LLM hit its output token limit before finishing the answer; "
+        "raise TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS, lower TRANSCRIPT_LLM_THINKING_LEVEL, or ask "
+        "a narrower question.",
+        retryable=False,
+        details={"provider": provider, "max_output_tokens": max_output_tokens},
+    )
+
+
 def _llm_http_error(
     provider: str,
     status: int,
@@ -221,7 +233,8 @@ class TranscriptLLMClient:
         api_key: str,
         model: str,
         base_url: str,
-        max_output_tokens: int = 4096,
+        max_output_tokens: int = 8192,
+        thinking_level: LLMThinkingLevel = "low",
         timeout_seconds: float = 90.0,
         max_retries: int = 2,
         retry_budget_seconds: float = 20.0,
@@ -238,6 +251,7 @@ class TranscriptLLMClient:
         self._model = model.strip()
         self._base_url = base_url.rstrip("/")
         self._max_output_tokens = max_output_tokens
+        self._thinking_level = thinking_level
         self._timeout = httpx.Timeout(
             connect=min(10.0, timeout_seconds),
             read=timeout_seconds,
@@ -317,6 +331,10 @@ class TranscriptLLMClient:
                     "responseSchema": _GEMINI_RESPONSE_SCHEMA,
                 },
             }
+            if self._thinking_level:
+                body_json["generationConfig"]["thinkingConfig"] = {
+                    "thinkingLevel": self._thinking_level
+                }
         else:
             url = f"{self._base_url}/chat/completions"
             headers = {
@@ -434,6 +452,8 @@ class TranscriptLLMClient:
                 details={"provider": "gemini"},
             )
         first = candidates[0] if isinstance(candidates[0], dict) else {}
+        if first.get("finishReason") == "MAX_TOKENS":
+            raise _truncated_output_error("gemini", self._max_output_tokens)
         raw_content = first.get("content")
         content = raw_content if isinstance(raw_content, dict) else {}
         raw_parts = content.get("parts")
@@ -467,6 +487,8 @@ class TranscriptLLMClient:
                 details={"provider": "openai"},
             )
         first = choices[0] if isinstance(choices[0], dict) else {}
+        if first.get("finish_reason") == "length":
+            raise _truncated_output_error("openai", self._max_output_tokens)
         raw_msg = first.get("message")
         message = raw_msg if isinstance(raw_msg, dict) else {}
         raw_text = str(message.get("content") or "")

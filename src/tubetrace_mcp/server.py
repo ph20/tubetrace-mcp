@@ -350,6 +350,7 @@ def build_state(
             model=settings.effective_llm_model,
             base_url=settings.effective_llm_base_url,
             max_output_tokens=settings.transcript_llm_max_output_tokens,
+            thinking_level=settings.transcript_llm_thinking_level,
             timeout_seconds=settings.transcript_llm_timeout_seconds,
             max_retries=settings.upstream_max_retries,
             retry_budget_seconds=settings.upstream_retry_budget_seconds,

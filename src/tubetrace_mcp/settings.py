@@ -31,8 +31,10 @@ _PROXY_SCHEMES = frozenset({"http", "https"})
 AppEnv = Literal["development", "production"]
 AuthMode = Literal["bearer", "platform"]
 LLMProvider = Literal["gemini", "openai"]
+# Gemini 3 thinkingConfig.thinkingLevel; "" omits thinkingConfig (model default / non-Gemini-3).
+LLMThinkingLevel = Literal["", "minimal", "low", "medium", "high"]
 
-DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
@@ -167,10 +169,21 @@ class Settings(BaseSettings):
         description="Maximum formatted transcript characters sent to the LLM in a single pass.",
     )
     transcript_llm_max_output_tokens: int = Field(
-        default=4096,
+        default=8192,
         ge=256,
         le=65536,
-        description="Maximum output tokens requested from the transcript analysis LLM.",
+        description=(
+            "Maximum output tokens requested from the transcript analysis LLM. For Gemini "
+            "thinking models this budget also covers thinking tokens."
+        ),
+    )
+    transcript_llm_thinking_level: LLMThinkingLevel = Field(
+        default="low",
+        description=(
+            "Gemini thinkingConfig.thinkingLevel for youtube_analyze_transcript: 'minimal', "
+            "'low', 'medium' or 'high'. Empty omits thinkingConfig (use for models without "
+            "thinkingLevel support). Ignored when TRANSCRIPT_LLM_PROVIDER=openai."
+        ),
     )
     transcript_llm_timeout_seconds: float = Field(
         default=90.0,
@@ -272,6 +285,11 @@ class Settings(BaseSettings):
         if parts.path not in ("", "/") or parts.query or parts.fragment:
             raise ValueError("TRANSCRIPT_PROXY_URL must not contain a path, query or fragment")
         return SecretStr(raw)
+
+    @field_validator("transcript_llm_thinking_level", mode="before")
+    @classmethod
+    def _llm_thinking_level(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
 
     @field_validator("transcript_llm_base_url")
     @classmethod

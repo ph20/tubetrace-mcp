@@ -190,7 +190,7 @@ The full list with defaults is in [`.env.example`](.env.example).
 | server secret | `YOUTUBE_API_KEY` | Google key restricted to the YouTube Data API v3. Optional. |
 | server secret | `TRANSCRIPT_PROXY_URL` | `http(s)://user:password@host:port` proxy for **transcript requests only**; search never uses it. Optional. See [Transcript proxy](#transcript-proxy). |
 | server secret | `TRANSCRIPT_LLM_API_KEY` | API key for the optional long-context transcript analysis LLM (`youtube_analyze_transcript`). When unset, `youtube_analyze_transcript` is hidden from `tools/list`. |
-| llm config | `TRANSCRIPT_LLM_PROVIDER`, `TRANSCRIPT_LLM_MODEL`, `TRANSCRIPT_LLM_BASE_URL`, `TRANSCRIPT_LLM_MAX_INPUT_CHARS`, `TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS`, `TRANSCRIPT_LLM_TIMEOUT_SECONDS`, `ANALYSIS_TOOL_TIMEOUT_SECONDS` | Provider (`gemini` default, or `openai`), model (`gemini-3-flash-preview` default for Gemini), optional base URL override, character/token limits and timeouts for `youtube_analyze_transcript`. |
+| llm config | `TRANSCRIPT_LLM_PROVIDER`, `TRANSCRIPT_LLM_MODEL`, `TRANSCRIPT_LLM_BASE_URL`, `TRANSCRIPT_LLM_MAX_INPUT_CHARS`, `TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS`, `TRANSCRIPT_LLM_THINKING_LEVEL`, `TRANSCRIPT_LLM_TIMEOUT_SECONDS`, `ANALYSIS_TOOL_TIMEOUT_SECONDS` | Provider (`gemini` default, or `openai`), model (`gemini-3.8-flash` default for Gemini), optional base URL override, character/token limits (`8192` output tokens by default; for Gemini thinking models this includes thinking tokens), Gemini thinking level (`low` default; empty omits `thinkingConfig`) and timeouts for `youtube_analyze_transcript`. |
 | client credential (digest only) | `MCP_TOKEN_SHA256` | SHA-256 hex digest(s) of the bearer token, comma-separated for rotation. Required in production. |
 | mode | `APP_ENV` | `development` / `production` (fail-closed). |
 | network | `HOST`, `PORT` | application bind address (in Docker `0.0.0.0:8000`). |
@@ -703,7 +703,7 @@ Expected failures are returned as an **MCP tool error** (`isError: true`) with t
 | `UPSTREAM_RATE_LIMITED` | 429 from Google/YouTube | yes |
 | `UPSTREAM_TIMEOUT` | upstream timeout or the tool time budget | yes |
 | `UPSTREAM_ERROR` | other upstream/network/parsing failure (`details.reason`) | depends |
-| `LLM_UPSTREAM_ERROR` | long-context LLM returned an error, invalid key, or rate limit | 429/5xx yes |
+| `LLM_UPSTREAM_ERROR` | long-context LLM returned an error, invalid key, rate limit, or hit its output token limit before finishing | 429/5xx yes |
 
 JSON-schema validation errors of the arguments (for example `max_results: 51`) are also returned
 by FastMCP with `isError: true`, but with the pydantic validation text instead of a code. Protocol
