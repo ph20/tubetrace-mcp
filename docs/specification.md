@@ -50,7 +50,7 @@ Because `TranscriptService` already downloads and caches the complete `RawTransc
 1. Resolve and fetch the full transcript once (or read it from `TTLCache`).
 2. Optionally filter by `start_seconds` / `end_seconds` if the caller wants to analyze a specific chapter or time range.
 3. Format the entire transcript with compact timestamps (`[125.4s] text...`) so the subagent model can reference exact moments.
-4. Send the full transcript + the caller's `prompt` in **one single-pass request** to a configured long-context model (e.g., `gemini-3-flash-preview` with a 1M token window).
+4. Send the full transcript + the caller's `prompt` in **one single-pass request** to a configured long-context model (e.g., `gemini-3.8-flash` with a 1M token window).
 5. Return a compact, structured response containing the answer and optional timestamped citations (`start_seconds`, `timestamp_url`, `label`).
 
 ### 3.2 Prompt-Injection & Untrusted Data Guardrails
@@ -83,7 +83,7 @@ In accordance with the security invariant that transcripts are untrusted third-p
   "transcript_provider": "youtube_transcript_api",
   "transcript_cache_hit": true,
   "llm_provider": "gemini",
-  "llm_model": "gemini-3-flash-preview",
+  "llm_model": "gemini-3.8-flash",
   "total_segments": 1420,
   "analyzed_segments": 1420,
   "transcript_characters": 68450,
@@ -109,10 +109,11 @@ In accordance with the security invariant that transcripts are untrusted third-p
 Implemented directly over `httpx.AsyncClient` (no heavy third-party LLM SDK required):
 * `TRANSCRIPT_LLM_PROVIDER`: `"gemini"` (default, Google Generative Language REST API) or `"openai"` (any OpenAI-compatible `/v1/chat/completions` endpoint: OpenAI, OpenRouter, vLLM, etc.).
 * `TRANSCRIPT_LLM_API_KEY`: `SecretStr | None` — registered in `Settings.redaction_secrets` so it is never logged or echoed.
-* `TRANSCRIPT_LLM_MODEL`: `str` (defaults to `"gemini-3-flash-preview"` for `gemini`; required when `openai` is selected).
+* `TRANSCRIPT_LLM_MODEL`: `str` (defaults to `"gemini-3.8-flash"` for `gemini`; required when `openai` is selected).
 * `TRANSCRIPT_LLM_BASE_URL`: `str | None` (defaults to `https://generativelanguage.googleapis.com/v1beta` for `gemini` or `https://api.openai.com/v1` for `openai`).
 * `TRANSCRIPT_LLM_MAX_INPUT_CHARS`: `int` (default `2_000_000` chars $\approx$ 500k tokens; raises `TRANSCRIPT_TOO_LARGE` if exceeded).
-* `TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS`: `int` (default `4096`).
+* `TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS`: `int` (default `8192`; for Gemini thinking models the budget covers thinking + answer tokens; a truncated answer (`finishReason=MAX_TOKENS` / `finish_reason=length`) raises `LLM_UPSTREAM_ERROR` instead of returning partial JSON).
+* `TRANSCRIPT_LLM_THINKING_LEVEL`: `"minimal" | "low" | "medium" | "high" | ""` (default `"low"`; sent as `generationConfig.thinkingConfig.thinkingLevel` for `gemini`; empty omits it; ignored for `openai`).
 * `TRANSCRIPT_LLM_TIMEOUT_SECONDS`: `float` (default `90.0`; `ANALYSIS_TOOL_TIMEOUT_SECONDS` defaults to `110.0`, staying below Caddy's `120s` and Horizon's `170s` limits).
 
 > [!IMPORTANT]

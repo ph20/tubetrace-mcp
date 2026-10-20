@@ -313,7 +313,7 @@ async def test_conditional_analyze_transcript_tool_and_metadata_tools(
 
     class InMemoryLLM:
         provider = "gemini"
-        model = "gemini-3-flash-preview"
+        model = "gemini-3.8-flash"
 
         async def analyze(
             self,

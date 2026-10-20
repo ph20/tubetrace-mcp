@@ -325,7 +325,7 @@ async def test_gemini_and_openai_llm_client_and_retries() -> None:
             http=http,
             provider="gemini",
             api_key="test-gemini-secret-key",
-            model="gemini-3-flash-preview",
+            model="gemini-3.8-flash",
             base_url="https://generativelanguage.googleapis.com/v1beta",
             sleep=sleep,
             rng=lambda: 0.0,
@@ -348,6 +348,8 @@ async def test_gemini_and_openai_llm_client_and_retries() -> None:
     assert "test-gemini-secret-key" not in str(sent.url)
     body = json.loads(sent.content.decode("utf-8"))
     assert "<untrusted_transcript>" in body["contents"][0]["parts"][0]["text"]
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert body["generationConfig"]["maxOutputTokens"] == 8192
 
     # OpenAI-compatible client with fenced JSON
     responses.append(
@@ -395,7 +397,7 @@ async def test_analysis_service_time_slice_and_size_guard() -> None:
 
     class FakeLLM:
         provider = "gemini"
-        model = "gemini-3-flash-preview"
+        model = "gemini-3.8-flash"
 
         def __init__(self) -> None:
             self.last_transcript = ""
@@ -460,7 +462,15 @@ async def test_analysis_service_time_slice_and_size_guard() -> None:
 def test_llm_settings_validation_and_redaction() -> None:
     s_default = make_settings()
     assert s_default.llm_configured is False
-    assert s_default.effective_llm_model == "gemini-3-flash-preview"
+    assert s_default.effective_llm_model == "gemini-3.8-flash"
+    assert s_default.transcript_llm_thinking_level == "low"
+    assert s_default.transcript_llm_max_output_tokens == 8192
+    assert make_settings(transcript_llm_thinking_level=" HIGH ").transcript_llm_thinking_level == (
+        "high"
+    )
+    assert make_settings(transcript_llm_thinking_level="").transcript_llm_thinking_level == ""
+    with pytest.raises(ValidationError):
+        make_settings(transcript_llm_thinking_level="turbo")
 
     s_gemini = make_settings(transcript_llm_api_key="AQ.Ab8RN6L_test_secret_key_value")
     assert s_gemini.llm_configured is True
@@ -476,3 +486,79 @@ def test_llm_settings_validation_and_redaction() -> None:
             transcript_llm_api_key="sk-test-1234567890",
             transcript_llm_model=None,
         )
+
+
+def _gemini_client(http: httpx.AsyncClient, **kwargs: Any) -> TranscriptLLMClient:
+    return TranscriptLLMClient(
+        http=http,
+        provider="gemini",
+        api_key="test-gemini-secret-key",
+        model="gemini-3.8-flash",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        sleep=NoSleep(),
+        rng=lambda: 0.0,
+        **kwargs,
+    )
+
+
+async def test_gemini_thinking_config_omitted_when_level_empty() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        text = json.dumps({"answer": "ok", "citations": []})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        out = await _gemini_client(http, thinking_level="").analyze(
+            prompt="Q", formatted_transcript="[0s] hi", video_id=VIDEO_ID, language_code="en"
+        )
+    assert out.answer == "ok"
+    body = json.loads(seen[0].content.decode("utf-8"))
+    assert "thinkingConfig" not in body["generationConfig"]
+
+
+async def test_truncated_llm_output_is_an_error_not_a_partial_answer() -> None:
+    partial = '{"answer": "1. Intro [21.88s]. 2. Pre-train'
+
+    def gemini_handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": partial}]}}
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gemini_handler)) as http:
+        with pytest.raises(TubeTraceError) as err:
+            await _gemini_client(http, max_output_tokens=4096).analyze(
+                prompt="Q", formatted_transcript="[0s] hi", video_id=VIDEO_ID, language_code="en"
+            )
+    assert err.value.code == ErrorCode.LLM_UPSTREAM_ERROR
+    assert err.value.retryable is False
+    assert err.value.details == {"provider": "gemini", "max_output_tokens": 4096}
+    assert "TRANSCRIPT_LLM_MAX_OUTPUT_TOKENS" in err.value.message
+
+    def openai_handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "length", "message": {"content": partial}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(openai_handler)) as http:
+        openai_client = TranscriptLLMClient(
+            http=http,
+            provider="openai",
+            api_key="sk-test-openai-secret",
+            model="gpt-4.1-mini",
+            base_url="https://api.openai.com/v1",
+            sleep=NoSleep(),
+            rng=lambda: 0.0,
+        )
+        with pytest.raises(TubeTraceError) as err2:
+            await openai_client.analyze(
+                prompt="Q", formatted_transcript="[0s] hi", video_id=VIDEO_ID, language_code="en"
+            )
+    assert err2.value.details["provider"] == "openai"
